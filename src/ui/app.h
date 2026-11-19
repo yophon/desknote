@@ -55,6 +55,7 @@ public:
     void Expand();
     void Collapse();
     void OnRemindersFired();
+    void AddItem(const Str& text);    // 末尾加一条（快速添加）
     void Undo();
     void Redo();
     bool CanUndo() const { return undo.n > 0; }
@@ -86,7 +87,7 @@ public:
     void TestBeginEdit(int index, const wchar_t* text);
     void TestMenuDelete(int index);
     void TestToggleDone(int index);
-    void TestSetRemind(int index, Time t);
+    void TestSetRemind(int index, Time t, int repeat = 0);
 
     static const int NotEditing = -1, TitleIndex = -2;
     // 窗口事件（window.h）
@@ -236,6 +237,7 @@ struct App
     Window* trashWnd = nullptr;
     Window* manageWnd = nullptr;
     Window* settingsWnd = nullptr;
+    Window* quickWnd = nullptr;
     NoteWin* balloonNote = nullptr;
     Syncer* sync = nullptr;
 
@@ -263,8 +265,15 @@ struct App
     void OnNoteSaved();
     void OpenSyncedNote(NoteData* n);
     void CreateNoteFromContent(const Str& json, const wchar_t* suffix);
-    const wchar_t* ApplyHotkey(); // nullptr = 成功
-    void PauseHotkey();           // 录新快捷键时先放开旧的
+    enum { HotkeyPeek = 1, HotkeyQuickAdd = 2 };
+    const wchar_t* ApplyHotkey(int id); // 按设置（重新）注册；nullptr = 成功或没启用
+    void ApplyHotkeys();
+    void PauseHotkey(int id);           // 录新快捷键时先放开旧的
+    void OnHotkey(int id);
+    // 快速添加：快捷键弹小输入框，加到选定的便签（没选或找不到就用第一张）
+    void ShowQuickAdd();
+    NoteWin* QuickAddTarget();
+    bool QuickAdd(const Str& text);
     void CheckFileChanges();
     void Exit();
 
@@ -286,8 +295,10 @@ void ManageWindowRefresh(Window* w);
 Window* TrashWindowCreate();
 void TrashWindowRefresh(Window* w);
 Window* SettingsWindowCreate();
+Window* QuickAddWindowCreate();
+void QuickAddWindowFocus(Window* w);
 void SettingsWindowSyncStatus(Window* w);
-int ReminderDialog(void* owner, const Str& itemText, bool hasCurrent, Time current, Time* result); // 0 取消，1 设定，2 移除
+int ReminderDialog(void* owner, const Str& itemText, bool hasCurrent, Time current, int* repeat, Time* result); // 0 取消，1 设定，2 移除；repeat 进出都是 Repeat*
 bool HotkeyParse(const Str& s, int* mods, int* vk); // 修饰键是 Mod*，按键是 Key*
 Str HotkeyFormat(int mods, int vk);
 

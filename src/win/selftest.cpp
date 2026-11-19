@@ -382,6 +382,49 @@ static void Phase1(const Str& server, const Str& key)
     Check(L"提醒存进文件", fa && fa->items[0].hasRemind && fa->items[0].remind == due && fa->items[0].reminded && fa->items[1].hasRemind && !fa->items[1].reminded);
     delete fa;
 
+    // ---- 重复提醒：到点后顺延到下一次，已勾掉的重新打开，不变红 ----
+    a->TestSetRemind(1, due, RepeatDaily);
+    a->d->items[1].done = true;
+    app->CheckReminders();
+    Check(L"每天重复：顺延到明天同一时刻", a->d->items[1].hasRemind && a->d->items[1].remind == due + TicksPerDay && !a->d->items[1].reminded,
+          FormatTime(a->d->items[1].remind, false));
+    Check(L"每天重复：已勾掉的重新打开", !a->d->items[1].done);
+    fa = ReadNoteFile(a->d->id);
+    Check(L"重复规律存进文件", fa && fa->items[1].repeat == RepeatDaily && fa->items[1].remind == due + TicksPerDay);
+    delete fa;
+    app->CheckReminders();
+    Check(L"顺延后今天不再提醒", a->d->items[1].remind == due + TicksPerDay);
+    a->TestSetRemind(1, due, RepeatWeekly);
+    a->d->items[1].reminded = true; // 别处同步来的「已提醒」
+    app->CheckReminders();
+    Check(L"重复的带着已提醒标记也会顺延", a->d->items[1].remind == due + 7 * TicksPerDay && !a->d->items[1].reminded,
+          FormatTime(a->d->items[1].remind, false));
+    a->TestSetRemind(1, now + TicksPerDay);
+
+    // ---- 快速添加 ----
+    {
+        Str keepTarget = app->settings.quickAddNote;
+        app->settings.quickAddNote = a->d->id;
+        int n0 = a->d->items.n;
+        Check(L"快速添加：加到选定的便签", app->QuickAddTarget() == a && app->QuickAdd(Str(L"  快速添加的一条 ")) && a->d->items.n == n0 + 1 &&
+              a->d->items[a->d->items.n - 1].text.Eq(L"快速添加的一条"), Texts(a->d));
+        Check(L"快速添加：空内容不加", !app->QuickAdd(Str(L"   ")) && a->d->items.n == n0 + 1);
+        NoteData* qa = ReadNoteFile(a->d->id);
+        Check(L"快速添加：存进文件", qa && qa->items.n == n0 + 1);
+        delete qa;
+        app->settings.quickAddNote = L"不存在的便签";
+        Check(L"快速添加：选的便签找不到时用第一张", app->QuickAddTarget() == app->notes[0]);
+        app->settings.quickAddNote = keepTarget;
+        a->Undo();
+        Check(L"快速添加能撤销", a->d->items.n == n0, Texts(a->d));
+        app->ShowQuickAdd();
+        Pump(200);
+        Check(L"快速添加窗口能打开", app->quickWnd != nullptr);
+        if (app->quickWnd) Wnd::Destroy(app->quickWnd);
+        Pump(100);
+        Check(L"快速添加窗口关掉后清空", app->quickWnd == nullptr);
+    }
+
     // ---- 编辑时外部改了文件：合并而不是覆盖 ----
     a->TestBeginEdit(1, L"正在编辑的这条");
     NoteData* ext = NoteData::FromContentJson(a->d->ContentJson(), a->d->id);

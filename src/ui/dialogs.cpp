@@ -356,7 +356,7 @@ void TrashWindowRefresh(Window* w)
 // =====================================================================
 // 设置：仿 Win11 设置页（分组标题 + 卡片 + 开关），整页自绘，只有三个输入框用系统控件
 // =====================================================================
-enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave, SOpenGopan, SLinkRepo, SLinkGopanRepo, SLinkGopanWeb };
+enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave, SOpenGopan, SLinkRepo, SLinkGopanRepo, SLinkGopanWeb, SQkToggle, SQkKeys };
 struct HitArea { int id; RectF r; };
 
 struct SettingsWin : WinHandler
@@ -370,7 +370,8 @@ struct SettingsWin : WinHandler
     float scroll = 0, contentH = 0;
     bool recording = false;
     int recMods = 0;
-    Str hkMsg;                        // 快捷键出错时的提示
+    int recWhich = 0;                 // 正在录哪个：0 提到最前，1 快速添加
+    Str hkMsg[2];                     // 快捷键出错时的提示
 
     void Invalidate() { Wnd::Invalidate(win); }
 
@@ -384,9 +385,15 @@ struct SettingsWin : WinHandler
         Wnd::FieldSetCue(edits[0], Str(DefaultSyncServer));
         Wnd::FieldSetCue(edits[2], Str(L"DeskNote"));
         KeyCue();
-        const wchar_t* e = g_app->ApplyHotkey();
-        hkMsg = e ? e : L"";
+        for (int i = 0; i < 2; i++)
+        {
+            const wchar_t* e = g_app->ApplyHotkey(HkId(i));
+            hkMsg[i] = e ? e : L"";
+        }
     }
+
+    static int HkId(int which) { return which ? App::HotkeyQuickAdd : App::HotkeyPeek; }
+    static Str& HkText(int which) { return which ? g_app->settings.quickAddHotkey : g_app->settings.hotkey; }
 
     // ---- 画控件 ----
     void Toggle(Painter* rt, int id, bool on, bool enabled, float right, float cy)
@@ -456,11 +463,13 @@ struct SettingsWin : WinHandler
     }
 
     // 快捷键：一组按键帽 + 编辑按钮；返回占的宽度
-    float HotkeyKeys(Painter* rt, float right, float cy, bool enabled)
+    float HotkeyKeys(Painter* rt, float right, float cy, bool enabled, int which)
     {
         const Ui::Theme& T = Ui::T;
+        const int keysId = which ? SQkKeys : SHkKeys;
+        const bool rec = recording && recWhich == which;
         Vec<Str> keys;
-        if (recording)
+        if (rec)
         {
             if (recMods & ModCtrl) keys.Push(Str(L"Ctrl"));
             if (recMods & ModAlt) keys.Push(Str(L"Alt"));
@@ -469,7 +478,7 @@ struct SettingsWin : WinHandler
         }
         else
         {
-            const Str& hk = g_app->settings.hotkey;
+            const Str& hk = HkText(which);
             int start = 0;
             for (int i = 0; i <= hk.n; i++)
                 if (i == hk.n || hk.p[i] == L'+') { Str k = hk.Sub(start, i - start).Trim(); if (k.n) keys.Push(k); start = i + 1; }
@@ -483,15 +492,15 @@ struct SettingsWin : WinHandler
         float total = 0;
         for (int i = 0; i < n; i++) { widths[i] = Max(30.f, Ui::Measure(keys[i], 12, 600) + 18); total += widths[i] + (i ? 4 : 0); }
         Str waiting(L"请按组合键");
-        if (recording && !n) total = Ui::Measure(waiting, 12, 400) + 24;
+        if (rec && !n) total = Ui::Measure(waiting, 12, 400) + 24;
         float left = x - total;
-        if (enabled) { HitArea a = { SHkKeys, RectF(left - 4, cy - 18, right, cy + 18) }; hits.Push(a); }
+        if (enabled) { HitArea a = { keysId, RectF(left - 4, cy - 18, right, cy + 18) }; hits.Push(a); }
         if (rt)
         {
-            bool hot = enabled && hover == SHkKeys;
-            if (hot || recording) Ui::Fill(rt, pen, 4, recording ? T.subtlePress : T.subtleHover);
+            bool hot = enabled && hover == keysId;
+            if (hot || rec) Ui::Fill(rt, pen, 4, rec ? T.subtlePress : T.subtleHover);
             Ui::Icon(rt, 0xE70F, (pen.left + pen.right) / 2, cy, 14, enabled ? T.text2 : T.disabled);
-            if (recording && !n)
+            if (rec && !n)
             {
                 RectF r = RectF(left, cy - 15, x, cy + 15);
                 Ui::Stroke(rt, r, 4, T.accent, 1.5f);
@@ -559,21 +568,23 @@ struct SettingsWin : WinHandler
                              Str(g_app->isDefaultDir ? L"移动 exe 后，打开一次新位置的 exe，自启会跟着改过去" : L"用测试数据目录打开时不可用"),
                              T.text2, 84, true, 0);
         Toggle(rt, SAuto, Shell::AutoStartGet(), g_app->isDefaultDir, R - 16, (c.top + c.bottom) / 2);
-        y += 4;
+        for (int which = 0; which < 2; which++)
         {
+            y += 4;
+            bool on = which ? s.quickAddEnabled : s.hotkeyEnabled;
             Str desc;
             u32 dc = T.text2;
-            if (hkMsg.n) { desc = hkMsg; dc = T.critical; }
-            else if (recording) { desc = L"按下新的组合键（要带 Ctrl 或 Alt），Esc 取消"; dc = T.accent; }
-            else desc = L"临时把所有便签提到最前面，再按一次恢复";
+            if (hkMsg[which].n) { desc = hkMsg[which]; dc = T.critical; }
+            else if (recording && recWhich == which) { desc = L"按下新的组合键（要带 Ctrl 或 Alt），Esc 取消"; dc = T.accent; }
+            else desc = which ? L"弹出一个小输入框，回车就加到选定的便签（便签右键菜单里选）" : L"临时把所有便签提到最前面，再按一次恢复";
             // 右边控件的宽度要先量出来
             int keep = hits.n;
-            float keysW = HotkeyKeys(nullptr, 0, 0, s.hotkeyEnabled);
+            float keysW = HotkeyKeys(nullptr, 0, 0, on, which);
             while (hits.n > keep) hits.RemoveAt(hits.n - 1);
-            c = Card(rt, y, 0xE765, Str(L"全局快捷键"), desc, dc, 84 + 20 + keysW, true, 0);
+            c = Card(rt, y, which ? 0xE710 : 0xE765, Str(which ? L"快速添加" : L"全局快捷键"), desc, dc, 84 + 20 + keysW, true, 0);
             float cy = (c.top + c.bottom) / 2;
-            Toggle(rt, SHkToggle, s.hotkeyEnabled, true, R - 16, cy);
-            HotkeyKeys(rt, R - 16 - 84 - 20, cy, s.hotkeyEnabled);
+            Toggle(rt, which ? SQkToggle : SHkToggle, on, true, R - 16, cy);
+            HotkeyKeys(rt, R - 16 - 84 - 20, cy, on, which);
         }
 
         Section(rt, y, L"数据", false);
@@ -721,12 +732,13 @@ struct SettingsWin : WinHandler
     }
 
     // ---- 录快捷键 ----
-    void StartRecording()
+    void StartRecording(int which)
     {
         recording = true;
+        recWhich = which;
         recMods = 0;
-        hkMsg = L"";
-        g_app->PauseHotkey(); // 否则按下去会被系统直接截走
+        hkMsg[which] = L"";
+        g_app->PauseHotkey(HkId(which)); // 否则按下去会被系统直接截走
         Wnd::WantAllKeys(win, true);
         Wnd::Focus(win);
         Invalidate();
@@ -736,8 +748,8 @@ struct SettingsWin : WinHandler
         if (!recording) return;
         recording = false;
         Wnd::WantAllKeys(win, false);
-        const wchar_t* e = g_app->ApplyHotkey();
-        hkMsg = e ? e : L"";
+        const wchar_t* e = g_app->ApplyHotkey(HkId(recWhich));
+        hkMsg[recWhich] = e ? e : L"";
         Invalidate();
     }
     void OnRecordKey(int vk, int mods)
@@ -754,11 +766,19 @@ struct SettingsWin : WinHandler
         if (!valid || !(mods & (ModCtrl | ModAlt)))
         {
             recMods = mods;
-            hkMsg = L"要带 Ctrl 或 Alt，再加一个字母、数字或 F 键";
+            hkMsg[recWhich] = L"要带 Ctrl 或 Alt，再加一个字母、数字或 F 键";
             Invalidate();
             return;
         }
-        g_app->settings.hotkey = HotkeyFormat(mods, vk);
+        Str hk = HotkeyFormat(mods, vk);
+        if (hk == HkText(1 - recWhich))
+        {
+            recMods = mods;
+            hkMsg[recWhich] = L"和另一个快捷键重复了";
+            Invalidate();
+            return;
+        }
+        HkText(recWhich) = hk;
         Store::SaveSettings(g_app->settings);
         StopRecording();
     }
@@ -769,17 +789,25 @@ struct SettingsWin : WinHandler
         switch (id)
         {
         case SAuto: if (g_app->isDefaultDir) Shell::AutoStartSet(!Shell::AutoStartGet()); break;
-        case SHkToggle:
+        case SHkToggle: case SQkToggle:
         {
-            recording = false;
-            Wnd::WantAllKeys(win, false);
-            s.hotkeyEnabled = !s.hotkeyEnabled;
+            int which = id == SQkToggle;
+            if (recording) StopRecording();
+            bool& on = which ? s.quickAddEnabled : s.hotkeyEnabled;
+            on = !on;
             Store::SaveSettings(s);
-            const wchar_t* e = g_app->ApplyHotkey();
-            hkMsg = e ? e : L"";
+            const wchar_t* e = g_app->ApplyHotkey(HkId(which));
+            hkMsg[which] = e ? e : L"";
             break;
         }
-        case SHkKeys: if (recording) StopRecording(); else StartRecording(); break;
+        case SHkKeys: case SQkKeys:
+        {
+            int which = id == SQkKeys;
+            bool again = recording && recWhich == which;
+            if (recording) StopRecording();
+            if (!again) StartRecording(which);
+            break;
+        }
         case SOpenDir: Wnd::OpenFolder(Store::Dir); break;
         case SOpenBackup:
             EnsureDir(Store::BackupsDir.c());
@@ -826,7 +854,7 @@ struct SettingsWin : WinHandler
         {
             if (ev.button != MouseLeft) return false;
             int id = HitAt(ev.x, ev.y);
-            if (recording && id != SHkKeys) StopRecording();
+            if (recording && id != (recWhich ? SQkKeys : SHkKeys)) StopRecording();
             Wnd::Focus(w); // 点空白处：输入框失去焦点
             press = id;
             if (id) Wnd::Capture(w, true);
@@ -868,7 +896,7 @@ struct SettingsWin : WinHandler
         case EvScale: ClampScroll(); PlaceEdits(); Invalidate(); return true;
         case EvTheme: ApplyTheme(); return true;
         case EvDestroy:
-            g_app->ApplyHotkey();
+            g_app->ApplyHotkeys();
             g_app->settingsWnd = nullptr;
             delete this;
             return true;
@@ -935,6 +963,7 @@ struct ReminderWin : WinHandler
     bool done = false;
     int result = 0;           // 0 取消，1 设定，2 移除
     Time resultTime = 0;
+    int repeat = RepeatNone;
     Str itemText;
     bool hasCurrent = false;
     Time quick[4];
@@ -948,7 +977,7 @@ struct ReminderWin : WinHandler
     int hover = 0, press = 0;
     float contentH = 0;
     static const int Width = 420;
-    enum { HQuick = 1, HPrevDay = 10, HNextDay, HMinus, HPlus, HOk, HCancel, HRemove };
+    enum { HQuick = 1, HPrevDay = 10, HNextDay, HMinus, HPlus, HOk, HCancel, HRemove, HRepeat = 20 };
 
     void Invalidate() { Wnd::Invalidate(win); }
 
@@ -1121,13 +1150,42 @@ struct ReminderWin : WinHandler
             if (f) Ui::Fill(rt, RectF(timeFrame.left + 1, timeFrame.bottom - 2, timeFrame.right - 1, timeFrame.bottom), 1, T.accent);
             else Ui::Line(rt, timeFrame.left + 3, timeFrame.bottom - 0.5f, timeFrame.right - 3, timeFrame.bottom - 0.5f, T.strong, 1);
         }
-        y += 56 + 8;
+        y += 56 + 12;
+
+        // 重复：不重复 / 每天 / 工作日 / 每周
+        {
+            static const wchar_t* names[4] = { L"不重复", L"每天", L"工作日", L"每周" };
+            const float rh = 32, sw = 72, gap = 4;
+            float ry = y + rh / 2;
+            if (rt) Ui::Text(rt, Str(L"重复"), RectF(L, ry - 12, L + 80, ry + 12), 14, 400, T.text);
+            float sx = R - 4 * sw - 3 * gap;
+            for (int i = 0; i < 4; i++)
+            {
+                RectF r = RectF(sx + i * (sw + gap), y, sx + i * (sw + gap) + sw, y + rh);
+                Push(HRepeat + i, r);
+                if (!rt) continue;
+                bool on = repeat == i, hot = hover == HRepeat + i;
+                if (on)
+                {
+                    Ui::Fill(rt, r, 4, T.accent);
+                    Ui::Text(rt, Str(names[i]), r, 14, 400, T.onAccent, Ui::Center);
+                }
+                else
+                {
+                    Ui::Fill(rt, r, 4, Ui::Solid(press == HRepeat + i ? T.ctrlPress : hot ? T.ctrlHover : T.ctrlFill, T.winBg));
+                    Ui::Stroke(rt, r, 4, T.ctrlBorder, 1);
+                    Ui::Text(rt, Str(names[i]), r, 14, 400, T.text, Ui::Center);
+                }
+            }
+            y += rh + 12;
+        }
         // 状态：时间写错了 / 已经过了
         int mins = Minutes();
         Str status;
         u32 sc = T.text2;
         if (mins < 0) { status = L"时间格式不对，例如 15:30"; sc = T.critical; }
         else if (day + mins * TicksPerMinute <= Now()) { status = L"这个时间已经过了，确定后会马上提醒"; sc = T.critical; }
+        else if (repeat != RepeatNone) status = L"到点后弹出系统通知，然后自动顺延到下一次；这一条已经勾掉的话，到点会重新打开。";
         else status = L"到点后弹出系统通知，条目上的提醒标签变红；程序没开着时错过的提醒，下次打开时补上。";
         float sh = Ui::MeasureWrap(status, CW, 12, 400);
         if (rt) Ui::TextWrap(rt, status, L, y, CW, 12, 400, sc);
@@ -1177,6 +1235,7 @@ struct ReminderWin : WinHandler
     void Activate(int id)
     {
         if (id >= HQuick && id < HQuick + quickN) { result = 1; resultTime = quick[id - HQuick]; done = true; return; }
+        if (id >= HRepeat && id < HRepeat + 4) { repeat = id - HRepeat; Invalidate(); return; }
         switch (id)
         {
         case HPrevDay: if (day > Today()) day -= TicksPerDay; break;
@@ -1256,9 +1315,10 @@ struct ReminderWin : WinHandler
     }
 };
 
-int ReminderDialog(void* owner, const Str& itemText, bool hasCurrent, Time current, Time* result)
+int ReminderDialog(void* owner, const Str& itemText, bool hasCurrent, Time current, int* repeat, Time* result)
 {
     ReminderWin d;
+    d.repeat = Clamp(*repeat, (int)RepeatNone, (int)RepeatWeekly);
     WinDesc desc;
     desc.title = L"设置提醒";
     desc.resizable = false;
@@ -1274,8 +1334,106 @@ int ReminderDialog(void* owner, const Str& itemText, bool hasCurrent, Time curre
     Wnd::PlaceCentered(d.win, ReminderWin::Width, d.contentH, 100, 0);
     d.PlaceEdit();
     Wnd::RunModal(d.win, &d.done);
-    if (d.result == 1) *result = d.resultTime;
+    if (d.result == 1) { *result = d.resultTime; *repeat = d.repeat; }
     return d.result;
+}
+
+// =====================================================================
+// 快速添加：快捷键弹出的小输入框，Enter 加到选定的便签，Esc 或点到别处就关
+// =====================================================================
+struct QuickAddWin : WinHandler
+{
+    Window* win = nullptr;
+    TextField* field = nullptr;
+    RectF frame;
+    float contentH = 0;
+    static const int Width = 460;
+
+    void Invalidate() { Wnd::Invalidate(win); }
+
+    void Build(Painter* rt)
+    {
+        const Ui::Theme& T = Ui::T;
+        const float L = 20, R = Width - 20;
+        float y = 16;
+        NoteWin* n = g_app->QuickAddTarget();
+        Str to = n ? L"加到「" + n->d->title + L"」" : Str(L"还没有便签，会新建一张");
+        if (rt) Ui::Text(rt, to, RectF(L, y, R, y + 22), 14, 600, T.text);
+        y += 22 + 10;
+        frame = RectF(L, y, R, y + 36);
+        if (rt)
+        {
+            bool f = Wnd::FieldHasFocus(field);
+            Ui::Fill(rt, frame, 4, f ? T.inputFocusBg : T.inputBg);
+            Ui::Stroke(rt, frame, 4, T.ctrlBorder, 1);
+            if (f) Ui::Fill(rt, RectF(frame.left + 1, frame.bottom - 2, frame.right - 1, frame.bottom), 1, T.accent);
+            else Ui::Line(rt, frame.left + 3, frame.bottom - 0.5f, frame.right - 3, frame.bottom - 0.5f, T.strong, 1);
+        }
+        y += 36 + 10;
+        Str hint(L"Enter 添加，Esc 取消。换一张便签：在便签上右键 →「快速添加到这张便签」");
+        float hh = Ui::MeasureWrap(hint, R - L, 12, 400);
+        if (rt) Ui::TextWrap(rt, hint, L, y, R - L, 12, 400, T.text2);
+        y += hh + 16;
+        contentH = y;
+    }
+
+    void PlaceEdit() { Wnd::FieldSetBounds(field, RectF(frame.left + 11, frame.top, frame.right - 11, frame.bottom)); }
+
+    void Paint(Window*, Painter* rt, float, float) override
+    {
+        Gfx::Clear(rt, Ui::T.winBg);
+        Build(rt);
+        PlaceEdit();
+    }
+
+    bool OnEvent(Window* w, const Event& ev) override
+    {
+        switch (ev.type)
+        {
+        case EvSubmit:
+            if (g_app->QuickAdd(Wnd::FieldText(field))) Wnd::Destroy(w);
+            return true;
+        case EvActivate:
+            if (!ev.button) Wnd::Destroy(w); // 点到别处：收起来
+            return false;
+        case EvFieldFocus: case EvFieldBlur: Invalidate(); return true;
+        case EvScale: PlaceEdit(); Invalidate(); return true;
+        case EvTheme:
+            Wnd::FieldStyle(field, FontNote, 15, 400, Ui::T.text, Ui::T.inputBg, Ui::T.inputFocusBg);
+            Invalidate();
+            return true;
+        case EvDestroy:
+            g_app->quickWnd = nullptr;
+            delete this;
+            return true;
+        }
+        return false;
+    }
+};
+
+Window* QuickAddWindowCreate()
+{
+    QuickAddWin* d = new QuickAddWin();
+    WinDesc desc;
+    desc.title = L"快速添加";
+    desc.resizable = false;
+    desc.minimizable = false;
+    desc.topmost = true;
+    d->win = Wnd::NewDialog(desc, d);
+    if (!d->win) { delete d; return nullptr; }
+    d->field = Wnd::CreateField(d->win, Str(), 0);
+    Wnd::FieldStyle(d->field, FontNote, 15, 400, Ui::T.text, Ui::T.inputBg, Ui::T.inputFocusBg);
+    Wnd::FieldSetCue(d->field, Str(L"要做的事"));
+    d->Build(nullptr);
+    Wnd::PlaceCentered(d->win, QuickAddWin::Width, d->contentH, 100, 0);
+    d->PlaceEdit();
+    return d->win;
+}
+
+void QuickAddWindowFocus(Window* w)
+{
+    QuickAddWin* d = (QuickAddWin*)Wnd::Handler(w);
+    if (d) Wnd::FieldFocus(d->field);
 }
 
 // =====================================================================

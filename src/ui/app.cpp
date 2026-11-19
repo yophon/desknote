@@ -38,7 +38,7 @@ void App::Start()
     for (int i = 0; i < list.n; i++) OpenWindow(list[i]);
     Store::DailyBackup();
     Shell::TrayShow();
-    ApplyHotkey();
+    ApplyHotkeys();
     Shell::WatchFolder(Store::NotesDir);
     Shell::SetTimer(TimerReminders, 15000);
     Shell::SetTimer(TimerGfx, 1000);
@@ -250,12 +250,19 @@ void App::CheckReminders()
         for (int i = 0; i < w->d->items.n; i++)
         {
             NoteItem& it = w->d->items[i];
-            if (it.hasRemind && !it.reminded && !it.done && it.remind <= now)
+            // 重复的不看「已提醒」（别处同步来的、改成重复前响过的，都要顺延）
+            if (!it.hasRemind || it.remind > now || (it.repeat == RepeatNone && it.reminded)) continue;
+            if (it.repeat != RepeatNone)
             {
-                it.reminded = true;
-                if (!first) first = &it;
-                count++;
+                // 重复的：顺延到下一次；已经勾掉的重新打开（今天做完了，下次还要做）
+                it.done = false;
+                it.reminded = false;
+                it.remind = NextRepeat(it.remind, it.repeat, now);
             }
+            else if (it.done) continue;
+            else it.reminded = true;
+            if (!first) first = &it;
+            count++;
         }
         if (!count) continue;
         Str text = first->text.Replace(L"\n", L" ");
@@ -323,17 +330,69 @@ void App::CheckFileChanges()
 // =====================================================================
 // 全局快捷键
 // =====================================================================
-const wchar_t* App::ApplyHotkey()
+const wchar_t* App::ApplyHotkey(int id)
 {
-    Shell::HotkeyUnregister();
-    if (!settings.hotkeyEnabled) return nullptr;
+    Shell::HotkeyUnregister(id);
+    bool on = id == HotkeyPeek ? settings.hotkeyEnabled : settings.quickAddEnabled;
+    const Str& hk = id == HotkeyPeek ? settings.hotkey : settings.quickAddHotkey;
+    if (!on) return nullptr;
     int mods, vk;
-    if (!HotkeyParse(settings.hotkey, &mods, &vk)) return L"快捷键格式不对";
-    if (!Shell::HotkeyRegister(mods, vk)) return L"注册失败，可能被其他软件占用了";
+    if (!HotkeyParse(hk, &mods, &vk)) return L"快捷键格式不对";
+    if (!Shell::HotkeyRegister(id, mods, vk)) return L"注册失败，可能被其他软件占用了";
     return nullptr;
 }
 
-void App::PauseHotkey() { Shell::HotkeyUnregister(); }
+void App::ApplyHotkeys()
+{
+    ApplyHotkey(HotkeyPeek);
+    ApplyHotkey(HotkeyQuickAdd);
+}
+
+void App::PauseHotkey(int id) { Shell::HotkeyUnregister(id); }
+
+void App::OnHotkey(int id)
+{
+    if (id == HotkeyPeek) TogglePeek();
+    else if (id == HotkeyQuickAdd) ShowQuickAdd();
+}
+
+// =====================================================================
+// 快速添加
+// =====================================================================
+NoteWin* App::QuickAddTarget()
+{
+    if (settings.quickAddNote.n)
+    {
+        NoteWin* w = Find(settings.quickAddNote);
+        if (w && !w->deleted) return w;
+    }
+    return notes.n ? notes[0] : nullptr;
+}
+
+bool App::QuickAdd(const Str& text)
+{
+    Str t = text.Trim();
+    if (!t.n) return false;
+    NoteWin* w = QuickAddTarget();
+    if (!w)
+    {
+        // 一张便签都没有：新建一张
+        NoteData* n = new NoteData();
+        n->id = NoteData::NewId();
+        Store::SaveNote(n);
+        w = OpenWindow(n);
+    }
+    w->AddItem(t);
+    return true;
+}
+
+void App::ShowQuickAdd()
+{
+    if (!quickWnd) quickWnd = QuickAddWindowCreate();
+    if (!quickWnd) return;
+    Wnd::Show(quickWnd);
+    QuickAddWindowFocus(quickWnd);
+}
 
 // =====================================================================
 // 退出
@@ -343,8 +402,10 @@ void App::Exit()
     if (exiting) return;
     exiting = true;
     for (int i = 0; i < notes.n; i++) { notes[i]->Destroy(); }
-    Shell::HotkeyUnregister();
+    Shell::HotkeyUnregister(HotkeyPeek);
+    Shell::HotkeyUnregister(HotkeyQuickAdd);
     Shell::TrayHide();
+    if (quickWnd) Wnd::Destroy(quickWnd);
     if (trashWnd) Wnd::Destroy(trashWnd);
     if (manageWnd) Wnd::Destroy(manageWnd);
     if (settingsWnd) Wnd::Destroy(settingsWnd);

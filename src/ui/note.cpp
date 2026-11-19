@@ -53,6 +53,20 @@ static Str FormatWhen(Time t)
     return s + hm;
 }
 
+// 提醒标签上的字：重复的写规律（每天 / 工作日 / 每周几），不重复的写下一次的时间
+static Str RemindText(const NoteItem& it)
+{
+    if (it.repeat == RepeatNone) return FormatWhen(it.remind);
+    DateTime st;
+    SplitTime(it.remind, &st);
+    Str hm;
+    hm.Pad2(st.hour).Ch(L':').Pad2(st.minute);
+    static const wchar_t* wk[7] = { L"日", L"一", L"二", L"三", L"四", L"五", L"六" };
+    if (it.repeat == RepeatDaily) return L"每天 " + hm;
+    if (it.repeat == RepeatWeekdays) return L"工作日 " + hm;
+    return Str(L"每周") + wk[st.dayOfWeek % 7] + L" " + hm;
+}
+
 // 条目显示的文字（提醒时间接在后面）和它的排版
 static Str ItemDisplay(const NoteItem& it, int* tagStart)
 {
@@ -62,7 +76,7 @@ static Str ItemDisplay(const NoteItem& it, int* tagStart)
     {
         *tagStart = s.n;
         s += L"  ⏰ ";
-        s += FormatWhen(it.remind);
+        s += RemindText(it);
     }
     return s;
 }
@@ -161,7 +175,7 @@ static float ChipWidth(const NoteData* d, const NoteItem& it)
 {
     if (!it.hasRemind) return 0;
     float f = ChipFont(d);
-    return R0(Ui::Measure(FormatWhen(it.remind), f, IsDue(it) ? 600 : 400) + f + 4 + 16);
+    return R0(Ui::Measure(RemindText(it), f, IsDue(it) ? 600 : 400) + f + 4 + 16);
 }
 // 条目文字可用的宽度（有提醒标签时让出位置）
 static float ItemTextWidth(const NoteData* d, const NoteItem& it, float avail)
@@ -175,8 +189,8 @@ static void DrawChip(Painter* rt, const NoteData* d, const NoteItem& it, float x
     bool due = IsDue(it);
     u32 c = due ? DueColor : d->textColor;
     Ui::Fill(rt, RectF(x, y, x + w, y + h), h / 2, Argb(c, (due ? 0.22f : 0.12f) * alpha));
-    Ui::Icon(rt, 0xEA8F, x + 8 + f / 2, y + h / 2, f, Argb(c, (due ? 1.f : 0.8f) * alpha));
-    Ui::Text(rt, FormatWhen(it.remind), RectF(x + 8 + f + 4, y, x + w - 4, y + h), f, due ? 600 : 400, Argb(c, (due ? 1.f : 0.8f) * alpha));
+    Ui::Icon(rt, it.repeat != RepeatNone ? 0xE8EE : 0xEA8F, x + 8 + f / 2, y + h / 2, f, Argb(c, (due ? 1.f : 0.8f) * alpha));
+    Ui::Text(rt, RemindText(it), RectF(x + 8 + f + 4, y, x + w - 4, y + h), f, due ? 600 : 400, Argb(c, (due ? 1.f : 0.8f) * alpha));
 }
 
 // 勾选框：圆角方框；勾上后实心，中间一个对勾
@@ -1592,7 +1606,7 @@ enum
 {
     CmdUndo = 1, CmdRedo, CmdUp, CmdDown, CmdDelete, CmdRemind, CmdUnremind, CmdAdd, CmdClearDone,
     CmdFold, CmdChecks, CmdModeDesktop, CmdModeTopmost, CmdModeNormal, CmdShadow, CmdOpacity, CmdFontSize,
-    CmdNewNote, CmdDeleteNote, CmdTrash, CmdSettings, CmdExit, CmdHide, CmdManage, CmdRename, CmdShow, CmdLocate,
+    CmdNewNote, CmdDeleteNote, CmdTrash, CmdSettings, CmdExit, CmdHide, CmdManage, CmdRename, CmdShow, CmdLocate, CmdQuickTarget,
     CmdWeight = 100, CmdTextColor = 200, CmdTextColorCustom = 220, CmdBgColor = 300, CmdBgColorCustom = 320
 };
 static const u32 TextColors[] = { DefaultTextColor, 0xF5F5F5, 0x222222, 0xF2C94C, 0xF08A3C, 0xE55B5B, 0x6CC27A, 0x5BA8E5 };
@@ -1716,6 +1730,8 @@ void NoteWin::OnContextMenu(int sx, int sy)
     AddStyleItems(m);
     m.Sep();
     m.Item(CmdNewNote, L"新建便签", 0xE70B);
+    m.Check(CmdQuickTarget, L"快速添加到这张便签", g_app->QuickAddTarget() == this,
+            g_app->settings.quickAddEnabled ? (L"按 " + g_app->settings.quickAddHotkey + L" 弹出输入框").c() : L"快速添加的快捷键没开（设置里）");
     m.Item(CmdHide, L"隐藏这张便签", 0xED1A);
     m.Item(CmdDeleteNote, L"删除这张便签…", 0xE74D);
     m.Sep();
@@ -1756,6 +1772,10 @@ void NoteWin::RunCommand(int cmd, int target)
     case CmdDeleteNote: g_app->DeleteNote(this, true); return;
     case CmdTrash: g_app->ShowTrash(); return;
     case CmdManage: g_app->ShowManage(); return;
+    case CmdQuickTarget:
+        g_app->settings.quickAddNote = d->id;
+        Store::SaveSettings(g_app->settings);
+        return;
     case CmdHide: SetHidden(true); return; // 之后 this 的窗口没了，直接返回
     case CmdShow: SetHidden(false); return;
     case CmdLocate: Locate(); return;
@@ -1813,17 +1833,31 @@ void NoteWin::EditReminder(int index)
     if (index < 0 || index >= d->items.n) return;
     NoteItem cur = d->items[index];
     Time t;
-    int r = ReminderDialog(Wnd::Native(win), cur.text, cur.hasRemind, cur.remind, &t);
+    int rep = cur.hasRemind ? cur.repeat : RepeatNone;
+    int r = ReminderDialog(Wnd::Native(win), cur.text, cur.hasRemind, cur.remind, &rep, &t);
     if (!r) { SendToBottom(); return; }
     if (index >= d->items.n || d->items[index].text != cur.text) return; // 对话框开着时条目被别处改了
     BeginChange();
     d->items[index].hasRemind = r == 1;
     if (r == 1) d->items[index].remind = t;
+    d->items[index].repeat = r == 1 ? rep : RepeatNone;
     d->items[index].reminded = false;
     Save();
     EndChange();
     Render();
     SendToBottom();
+}
+
+void NoteWin::AddItem(const Str& text)
+{
+    CommitEdit(true);
+    BeginChange();
+    NoteItem it;
+    it.text = text;
+    d->items.Push(it);
+    EndChange();
+    Save();
+    Render();
 }
 
 void NoteWin::OnRemindersFired()
@@ -2077,11 +2111,12 @@ void NoteWin::TestToggleDone(int index)
     EndChange();
     Save();
 }
-void NoteWin::TestSetRemind(int index, Time t)
+void NoteWin::TestSetRemind(int index, Time t, int repeat)
 {
     BeginChange();
     d->items[index].hasRemind = true;
     d->items[index].remind = t;
+    d->items[index].repeat = repeat;
     d->items[index].reminded = false;
     Save();
     EndChange();

@@ -27,8 +27,33 @@ JVal* NoteItem::ToJson() const
 {
     JVal* o = JNewObj();
     o->SetStr(L"text", text)->SetBool(L"done", done);
-    if (hasRemind) o->SetStr(L"remind", FormatTime(remind, false))->SetBool(L"reminded", reminded);
+    if (hasRemind)
+    {
+        o->SetStr(L"remind", FormatTime(remind, false))->SetBool(L"reminded", reminded);
+        static const wchar_t* names[] = { L"", L"daily", L"weekdays", L"weekly" };
+        if (repeat > RepeatNone && repeat <= RepeatWeekly) o->SetStr(L"repeat", Str(names[repeat]));
+    }
     return o;
+}
+
+Time NextRepeat(Time t, int repeat, Time after)
+{
+    if (repeat == RepeatNone) return t;
+    Time step = repeat == RepeatWeekly ? 7 * TicksPerDay : TicksPerDay;
+    // 关机很久后：先整周期跳到 after 附近，免得一次次加
+    if (t <= after) t += ((after - t) / step) * step;
+    for (int i = 0; i < 16; i++)
+    {
+        if (t > after)
+        {
+            if (repeat != RepeatWeekdays) return t;
+            DateTime d;
+            SplitTime(t, &d);
+            if (d.dayOfWeek >= 1 && d.dayOfWeek <= 5) return t;
+        }
+        t += step;
+    }
+    return t;
 }
 bool NoteItem::From(JVal* v, NoteItem* out)
 {
@@ -39,7 +64,14 @@ bool NoteItem::From(JVal* v, NoteItem* out)
     out->done = v->Bool(L"done", false);
     Time t;
     const Str* r = v->GetStr(L"remind");
-    if (r && ParseTime(*r, &t)) { out->hasRemind = true; out->remind = t; out->reminded = v->Bool(L"reminded", false); }
+    if (r && ParseTime(*r, &t))
+    {
+        out->hasRemind = true;
+        out->remind = t;
+        out->reminded = v->Bool(L"reminded", false);
+        Str rp = v->Str_(L"repeat", L"");
+        out->repeat = rp.Eq(L"daily") ? RepeatDaily : rp.Eq(L"weekdays") ? RepeatWeekdays : rp.Eq(L"weekly") ? RepeatWeekly : RepeatNone;
+    }
     return true;
 }
 
@@ -321,6 +353,9 @@ namespace Store
         if (!d) { Log(L"读取设置失败"); return s; }
         s.hotkeyEnabled = d->Bool(L"hotkeyEnabled", s.hotkeyEnabled);
         s.hotkey = d->Str_(L"hotkey", s.hotkey.c());
+        s.quickAddEnabled = d->Bool(L"quickAddEnabled", s.quickAddEnabled);
+        s.quickAddHotkey = d->Str_(L"quickAddHotkey", s.quickAddHotkey.c());
+        s.quickAddNote = d->Str_(L"quickAddNote", L"");
         s.autoStartInit = d->Bool(L"autoStartInit", false);
         s.syncEnabled = d->Bool(L"syncEnabled", false);
         s.syncServer = d->Str_(L"syncServer", DefaultSyncServer);
@@ -334,7 +369,9 @@ namespace Store
     void SaveSettings(const Settings& s)
     {
         JVal* o = JNewObj();
-        o->SetBool(L"hotkeyEnabled", s.hotkeyEnabled)->SetStr(L"hotkey", s.hotkey)->SetBool(L"autoStartInit", s.autoStartInit)
+        o->SetBool(L"hotkeyEnabled", s.hotkeyEnabled)->SetStr(L"hotkey", s.hotkey)
+            ->SetBool(L"quickAddEnabled", s.quickAddEnabled)->SetStr(L"quickAddHotkey", s.quickAddHotkey)->SetStr(L"quickAddNote", s.quickAddNote)
+            ->SetBool(L"autoStartInit", s.autoStartInit)
             ->SetBool(L"syncEnabled", s.syncEnabled)->SetStr(L"syncServer", s.syncServer)->SetStr(L"syncFolder", s.syncFolder)
             ->SetStr(L"syncKey", Plat::Protect(s.syncKey))->SetBool(L"hardwareRender", s.hardwareRender);
         if (!WriteAtomic(SettingsFile.c(), JWrite(o))) Log(L"保存设置失败");

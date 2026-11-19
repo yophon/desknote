@@ -173,6 +173,34 @@ static void TestStore(const Str& root)
     DeleteTree(dir.c());
 }
 
+static void TestRepeat()
+{
+    Time t = MakeTime(2026, 11, 19, 9, 0, 0); // 周四 9:00
+    Time after = MakeTime(2026, 11, 19, 9, 0, 30);
+    Check("每天：顺延到明天同一时刻", NextRepeat(t, RepeatDaily, after) == MakeTime(2026, 11, 20, 9, 0, 0));
+    Check("每周：顺延到下周四", NextRepeat(t, RepeatWeekly, after) == MakeTime(2026, 11, 26, 9, 0, 0));
+    Time fri = MakeTime(2026, 11, 20, 9, 0, 30);
+    Check("工作日：周五之后是下周一", NextRepeat(MakeTime(2026, 11, 20, 9, 0, 0), RepeatWeekdays, fri) == MakeTime(2026, 11, 23, 9, 0, 0));
+    Check("工作日：周四之后是周五", NextRepeat(t, RepeatWeekdays, after) == MakeTime(2026, 11, 20, 9, 0, 0));
+    Time later = MakeTime(2027, 3, 3, 12, 0, 0); // 关机好几个月后（周三中午）
+    Check("每天：关机很久后跳到之后的第一次", NextRepeat(t, RepeatDaily, later) == MakeTime(2027, 3, 4, 9, 0, 0));
+    Time w = NextRepeat(t, RepeatWeekly, later);
+    DateTime d;
+    SplitTime(w, &d);
+    Check("每周：关机很久后还是周四", d.dayOfWeek == 4 && w > later && w - later <= 7 * TicksPerDay && d.hour == 9);
+    Check("不重复：原样", NextRepeat(t, RepeatNone, after) == t);
+    NoteItem it;
+    it.text = L"x";
+    it.hasRemind = true;
+    it.remind = t;
+    it.repeat = RepeatWeekdays;
+    JVal* j = it.ToJson();
+    NoteItem back;
+    NoteItem::From(j, &back);
+    Check("重复写进 json 再读回", back.repeat == RepeatWeekdays && JWrite(j).Find(L"\"repeat\": \"weekdays\"") >= 0);
+    delete j;
+}
+
 static void TestLinks()
 {
     Vec<LinkSpan> l;
@@ -216,6 +244,7 @@ int main(int argc, char** argv)
     TestFiles(root);
     TestStore(root);
     TestLinks();
+    TestRepeat();
     TestMerge();
     if (g_fail) printf("FAILED %d\n", g_fail);
     else printf("ALL PASSED %d\n", g_pass);

@@ -112,12 +112,12 @@ void Notify(const Str& title, const Str& text)
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-bool HotkeyRegister(int mods, int key)
+bool HotkeyRegister(int id, int mods, int key)
 {
     UINT m = MOD_NOREPEAT | (mods & ModCtrl ? MOD_CONTROL : 0) | (mods & ModAlt ? MOD_ALT : 0) | (mods & ModShift ? MOD_SHIFT : 0) | (mods & ModWin ? MOD_WIN : 0);
-    return RegisterHotKey(g_mainWnd, 1, m, (UINT)key) != FALSE;
+    return RegisterHotKey(g_mainWnd, id, m, (UINT)key) != FALSE;
 }
-void HotkeyUnregister() { UnregisterHotKey(g_mainWnd, 1); }
+void HotkeyUnregister(int id) { UnregisterHotKey(g_mainWnd, id); }
 void SetTimer(int id, int ms) { ::SetTimer(g_mainWnd, (UINT_PTR)id, (UINT)ms, nullptr); }
 void KillTimer(int id) { ::KillTimer(g_mainWnd, (UINT_PTR)id); }
 void WatchFolder(const Str& dir)
@@ -140,7 +140,7 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l)
     if (g_app && g_taskbarCreated && m == (UINT)g_taskbarCreated) { Shell::TrayShow(); return 0; }
     switch (m)
     {
-    case WM_HOTKEY: if (w == 1) g_app->TogglePeek(); return 0;
+    case WM_HOTKEY: g_app->OnHotkey((int)w); return 0;
     case WM_APP_TRAY:
         switch (LOWORD(l))
         {
@@ -262,6 +262,7 @@ extern "C" void __stdcall Start()
     else if (open.Eq(L"capsule") && g_app->notes.n) g_app->notes[0]->Collapse();
     else if (open.Eq(L"preview") && g_app->notes.n) g_app->notes[0]->DebugPreview();
     else if (open.Eq(L"manage")) g_app->ShowManage();
+    else if (open.Eq(L"quickadd")) g_app->ShowQuickAdd();
     else if (open.Eq(L"managemenu") && g_app->notes.n)
     {
         g_app->ShowManage();
