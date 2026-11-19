@@ -158,6 +158,29 @@ namespace DeskNote
             root.Children.Add(auto);
             root.Children.Add(Hint("移动 exe 后，打开一次新位置的 exe，开机启动会自动改到新位置。"));
 
+            // ---- 显示 ----
+            root.Children.Add(Section("显示"));
+            var gpu = new CheckBox { Content = "用显卡渲染", IsChecked = app.Settings.HardwareRender };
+            var restartRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+            var restartNote = new TextBlock { Text = "重启 DeskNote 后生效", Foreground = Brushes.IndianRed, FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
+            var restartBtn = Ui.Btn("立即重启", delegate { app.Restart(); });
+            restartRow.Children.Add(restartNote);
+            restartRow.Children.Add(restartBtn);
+            Action updateRestart = delegate
+            {
+                restartRow.Visibility = (gpu.IsChecked == true) != DeskApp.HardwareRenderActive ? Visibility.Visible : Visibility.Collapsed;
+            };
+            gpu.Click += delegate
+            {
+                app.Settings.HardwareRender = gpu.IsChecked == true;
+                Store.SaveSettings(app.Settings);
+                updateRestart();
+            };
+            updateRestart();
+            root.Children.Add(gpu);
+            root.Children.Add(restartRow);
+            root.Children.Add(Hint("默认用 CPU 画，内存约 50MB。用显卡画时 Windows 要为它加载显卡驱动，会多占约 70MB，显示效果没有区别；只在发现显示不正常时再打开。"));
+
             // ---- 快捷键 ----
             root.Children.Add(Section("全局快捷键"));
             var enable = new CheckBox { Content = "启用", IsChecked = app.Settings.HotkeyEnabled };

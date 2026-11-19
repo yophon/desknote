@@ -335,7 +335,7 @@ namespace DeskNote
         // 同步到 gopan
         public bool SyncEnabled;
         public string SyncServer = "", SyncFolder = "/DeskNote", SyncKey = "";
-        // 用显卡渲染（默认关：软件渲染省约 70MB 内存）。只能在 settings.json 里改，重启生效
+        // 用显卡渲染（默认关：软件渲染省约 70MB 内存）。在设置里改，重启生效
         public bool HardwareRender;
     }
 

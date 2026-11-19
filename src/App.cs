@@ -22,7 +22,9 @@ namespace DeskNote
     class DeskApp
     {
         // 改版本号就改这里（major.minor.patch）
-        public const string Version = "1.2.0";
+        public const string Version = "1.2.1";
+        // 这次运行实际用的渲染方式（改设置后要重启才变）
+        public static bool HardwareRenderActive;
         // 编译时间：取 exe 文件的修改时间
         public static DateTime BuildTime { get { try { return File.GetLastWriteTime(Assembly.GetExecutingAssembly().Location); } catch { return DateTime.MinValue; } } }
 
@@ -467,6 +469,15 @@ namespace DeskNote
         }
 
         // ---------------------------------------------------------------
+        // 重启自己（换渲染方式等需要重启的设置）
+        public void Restart()
+        {
+            var args = "--wait-pid " + System.Diagnostics.Process.GetCurrentProcess().Id;
+            if (!IsDefaultDataDir) args += " --data \"" + Store.Dir + "\"";
+            System.Diagnostics.Process.Start(Assembly.GetExecutingAssembly().Location, args);
+            Exit();
+        }
+
         public void Exit()
         {
             if (exiting) return;
@@ -539,6 +550,13 @@ namespace DeskNote
                 if (args[i] == "--selftest" && i + 2 < args.Length) { testPhase = args[i + 1]; testOut = Path.GetFullPath(args[i + 2]); }
                 if (args[i] == "--sync-server") syncServer = args[i + 1];
                 if (args[i] == "--sync-key") syncKey = args[i + 1];
+                if (args[i] == "--wait-pid")
+                {
+                    // 设置里点“立即重启”：等旧进程退出后再启动
+                    int pid;
+                    if (int.TryParse(args[i + 1], out pid))
+                        try { System.Diagnostics.Process.GetProcessById(pid).WaitForExit(15000); } catch (ArgumentException) { }
+                }
             }
             if (testPhase != null && isDefault) return; // 自测只许在 --data 指定的测试目录里跑
             Store.Init(dir);
@@ -574,6 +592,7 @@ namespace DeskNote
                     string envRender = isDefault ? null : Environment.GetEnvironmentVariable("DESKNOTE_RENDER");
                     if (envRender == "hw") hw = true; else if (envRender == "sw") hw = false;
                     if (!hw) System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
+                    DeskApp.HardwareRenderActive = hw;
                     app.Start();
                     string memdiag = Environment.GetEnvironmentVariable("DESKNOTE_MEMDIAG");
                     if (!isDefault && !string.IsNullOrEmpty(memdiag))
