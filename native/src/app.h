@@ -73,6 +73,7 @@ public:
     // 自测、调界面用
     void DebugPreview() { Collapse(); ShowPreview(); KillTimer(hwnd, 1); }
     void DebugMenu(int sub);
+    void DebugReminder(int i) { EditReminder(i); }
     void DebugHover(int row, int btn) { hover = true; hoverRow = row; hoverBtn = btn; Render(); }
     void OnMenuLive(int id, float v);
     void TestTypeItem(int index, const wchar_t* text);
@@ -207,8 +208,6 @@ struct App
     NoteWin* balloonNote = nullptr;
     Syncer* sync = nullptr;
     HICON icon = nullptr, iconSmall = nullptr;
-    HFONT uiFont = nullptr;
-    int uiFontDpi = 0;
 
     void Start();
     NoteWin* OpenWindow(NoteData* n);
@@ -236,10 +235,6 @@ struct App
     const wchar_t* ApplyHotkey(); // nullptr = 成功
     void CheckFileChanges();
     void Exit();
-    HFONT UiFont(int dpi);
-    HFONT UiFontBold(int dpi);
-    HFONT uiFontBold = nullptr;
-    int uiFontBoldDpi = 0;
 
     static bool IsAutoStart();
     static void SetAutoStart(bool on);
@@ -254,7 +249,7 @@ void TrashWindowRefresh(HWND w);
 HWND SettingsWindowCreate();
 void SettingsWindowSyncStatus(HWND w);
 bool SettingsWindowWantsKeys(HWND w); // 正在录快捷键：按键别交给对话框导航处理
-bool ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result);
+int ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result); // 0 取消，1 设定，2 移除
 bool HotkeyParse(const Str& s, UINT* mods, UINT* vk);
 Str HotkeyFormat(UINT mods, UINT vk);
 void RegisterDialogClasses();

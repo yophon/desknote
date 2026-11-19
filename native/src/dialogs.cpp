@@ -1,118 +1,10 @@
-// 回收站、设置窗口（自绘），提醒对话框（系统控件）
+// 回收站、设置、提醒对话框（都是自绘，跟随系统深浅色）
 #include "ui.h"
 #include <dwmapi.h>
+#include <imm.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <windowsx.h>
-
-// =====================================================================
-// 布局小工具：控件位置按 DIP 记下来，换 DPI 时重新排
-// =====================================================================
-struct CtlPos { HWND h; int x, y, w, ht; bool bold; };
-struct DlgBase
-{
-    HWND hwnd = nullptr;
-    Vec<CtlPos> ctls;
-    Vec<HWND> hints;      // 灰色说明文字
-    HWND status = nullptr;
-    COLORREF statusColor = RGB(0x77, 0x77, 0x77);
-    int dpi = 96;
-    float S() const { return dpi / 96.f; }
-    HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id, DWORD ex = 0)
-    {
-        HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, (int)(x * S()), (int)(y * S()), (int)(w * S()), (int)(h * S()),
-                                 hwnd, (HMENU)(INT_PTR)id, g_inst, nullptr);
-        SendMessageW(c, WM_SETFONT, (WPARAM)g_app->UiFont(dpi), FALSE);
-        CtlPos p = { c, x, y, w, h, false };
-        ctls.Push(p);
-        return c;
-    }
-    void MakeBold(HWND c)
-    {
-        for (int i = 0; i < ctls.n; i++) if (ctls[i].h == c) ctls[i].bold = true;
-        SendMessageW(c, WM_SETFONT, (WPARAM)g_app->UiFontBold(dpi), TRUE);
-    }
-    HWND Hint(const wchar_t* text, int x, int y, int w, int h)
-    {
-        HWND c = Add(L"STATIC", text, SS_LEFT, x, y, w, h, 0);
-        hints.Push(c);
-        return c;
-    }
-    void Relayout(int newDpi)
-    {
-        dpi = newDpi;
-        HFONT f = g_app->UiFont(dpi);
-        for (int i = 0; i < ctls.n; i++)
-        {
-            MoveWindow(ctls[i].h, (int)(ctls[i].x * S()), (int)(ctls[i].y * S()), (int)(ctls[i].w * S()), (int)(ctls[i].ht * S()), TRUE);
-            SendMessageW(ctls[i].h, WM_SETFONT, (WPARAM)(ctls[i].bold ? g_app->UiFontBold(dpi) : f), TRUE);
-        }
-    }
-    // 根据内容区大小（DIP）设窗口大小
-    void SizeClient(int w, int h)
-    {
-        RECT r = { 0, 0, (int)(w * S()), (int)(h * S()) };
-        AdjustWindowRectExForDpi(&r, GetWindowLongW(hwnd, GWL_STYLE), FALSE, GetWindowLongW(hwnd, GWL_EXSTYLE), dpi);
-        SetWindowPos(hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-    void Center()
-    {
-        RECT r;
-        GetWindowRect(hwnd, &r);
-        POINT p;
-        GetCursorPos(&p);
-        MONITORINFO mi = { sizeof(mi) };
-        GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
-        int w = r.right - r.left, h = r.bottom - r.top;
-        SetWindowPos(hwnd, nullptr, (mi.rcWork.left + mi.rcWork.right - w) / 2, (mi.rcWork.top + mi.rcWork.bottom - h) / 2, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-    // 共用消息：字体颜色、DPI 变化
-    bool Common(UINT m, WPARAM w, LPARAM l, LRESULT* r)
-    {
-        if (m == WM_CTLCOLORSTATIC)
-        {
-            // 静态文字、勾选框、只读输入框都用窗口的白底
-            HWND c = (HWND)l;
-            HDC dc = (HDC)w;
-            SetBkMode(dc, TRANSPARENT);
-            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-            if (hints.Contains(c)) SetTextColor(dc, RGB(0x77, 0x77, 0x77));
-            else if (c == status) SetTextColor(dc, statusColor);
-            *r = (LRESULT)GetSysColorBrush(COLOR_WINDOW);
-            return true;
-        }
-        if (m == WM_DPICHANGED)
-        {
-            RECT* rc = (RECT*)l;
-            Relayout(HIWORD(w));
-            SetWindowPos(hwnd, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
-            *r = 0;
-            return true;
-        }
-        return false;
-    }
-};
-
-static int TextHeightDip(const wchar_t* text, int widthDip)
-{
-    HDC dc = GetDC(nullptr);
-    HFONT f = g_app->UiFont(96);
-    HGDIOBJ of = SelectObject(dc, f);
-    RECT r = { 0, 0, widthDip, 0 };
-    DrawTextW(dc, text, -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
-    SelectObject(dc, of);
-    ReleaseDC(nullptr, dc);
-    return r.bottom + 2;
-}
-
-static HWND CreateDlgWindow(const wchar_t* cls, const wchar_t* title, DWORD style, void* self, HWND owner)
-{
-    POINT p;
-    GetCursorPos(&p);
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_DLGMODALFRAME, cls, title, style, p.x, p.y, 100, 100, owner, nullptr, g_inst, self);
-    return h;
-}
 
 static void SetIcons(HWND h)
 {
@@ -1218,100 +1110,464 @@ static void RunModal(HWND dlg, HWND owner, bool* done)
 }
 
 // =====================================================================
-// 设置提醒：常用快捷选项 + 日期 + 时间
+// 设置提醒：常用时间一键选；或者自己定日期和时间（自绘，和设置页一个样式）
 // =====================================================================
-enum { IdQuick = 40, IdDate = 50, IdTime, IdOk, IdCancel };
-struct ReminderDlg : DlgBase
+static void DrawBtn(ID2D1RenderTarget* rt, D2D1_RECT_F r, const Str& text, wchar_t icon, int kind, bool hot, bool down, u32 under)
 {
-    bool done = false, ok = false;
-    Time result = 0;
-    Time quick[4];
-    int quickN = 0;
-    HWND date, time;
-    void Build(const Str& itemText, bool hasCurrent, Time current)
+    // kind：0 普通按钮，1 强调色按钮，2 无底色的图标/文字按钮
+    const Ui::Theme& T = Ui::T;
+    u32 fg = T.text;
+    if (kind == 1)
     {
-        const int W = 400, X = 20, CW = W - 40;
-        int y = 16;
-        Str shown = itemText.Replace(L"\n", L" ");
+        Ui::Fill(rt, r, 4, down ? (T.accent & 0x00FFFFFF) | 0xCC000000 : hot ? (T.accent & 0x00FFFFFF) | 0xE6000000 : T.accent);
+        fg = down ? (T.onAccent & 0x00FFFFFF) | 0x80000000 : T.onAccent;
+    }
+    else if (kind == 0)
+    {
+        Ui::Fill(rt, r, 4, Ui::Solid(down ? T.ctrlPress : hot ? T.ctrlHover : T.ctrlFill, under));
+        Ui::Stroke(rt, r, 4, T.ctrlBorder, 1);
+        if (!T.dark) Ui::Line(rt, r.left + 4, r.bottom - 0.5f, r.right - 4, r.bottom - 0.5f, T.ctrlBorderBottom, 1);
+        if (down) fg = T.text2;
+    }
+    else
+    {
+        if (hot) Ui::Fill(rt, r, 4, down ? T.subtlePress : T.subtleHover);
+        fg = T.text2;
+    }
+    if (icon) Ui::Icon(rt, icon, (r.left + r.right) / 2, (r.top + r.bottom) / 2, 14, fg);
+    else Ui::Text(rt, text, r, 14, 400, fg, Ui::Center);
+}
+
+struct ReminderWin
+{
+    HWND hwnd = nullptr;
+    int dpi = 96;
+    float S() const { return dpi / 96.f; }
+    bool done = false;
+    int result = 0;           // 0 取消，1 设定，2 移除
+    Time resultTime = 0;
+    Str itemText;
+    bool hasCurrent = false;
+    Time quick[4];
+    const wchar_t* quickLabel[4];
+    int quickN = 0;
+    Time day = 0;             // 自定义：哪一天（零点）
+    HWND timeEdit = nullptr;
+    HFONT editFont = nullptr;
+    int editH = 0;
+    HBRUSH brushRest = nullptr, brushFocus = nullptr;
+    D2D1_RECT_F timeFrame = {}, dateRow = {}, timeRow = {};
+    struct Hit { int id; D2D1_RECT_F r; };
+    Vec<Hit> hits;
+    int hover = 0, press = 0;
+    bool tracking = false;
+    float contentH = 0;
+    static const int Width = 420;
+    enum { HQuick = 1, HPrevDay = 10, HNextDay, HMinus, HPlus, HOk, HCancel, HRemove };
+
+    void Invalidate() { InvalidateRect(hwnd, nullptr, FALSE); }
+
+    void Init(const Str& text, bool has, Time current)
+    {
+        Str shown = text.Replace(L"\r", L"").Replace(L"\n", L" ").Trim();
         if (shown.n > 80) { shown.Truncate(80); shown += L"…"; }
-        int th = TextHeightDip(shown.c(), CW);
-        Add(L"STATIC", shown.c(), SS_LEFT | SS_NOPREFIX, X, y, CW, th, 0);
-        y += th + 12;
+        itemText = shown;
+        hasCurrent = has;
         SYSTEMTIME now;
         GetLocalTime(&now);
         Time t0 = Now();
         Time minuteNow = MakeTime(now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, 0);
-        const wchar_t* labels[4];
-        quick[quickN] = minuteNow + 30 * TicksPerMinute; labels[quickN++] = L"30 分钟后";
-        quick[quickN] = minuteNow + 60 * TicksPerMinute; labels[quickN++] = L"1 小时后";
+        quick[quickN] = minuteNow + 30 * TicksPerMinute; quickLabel[quickN++] = L"30 分钟后";
+        quick[quickN] = minuteNow + 60 * TicksPerMinute; quickLabel[quickN++] = L"1 小时后";
         Time tonight = Today() + 20 * 60 * TicksPerMinute;
-        if (tonight > t0 + 5 * TicksPerMinute) { quick[quickN] = tonight; labels[quickN++] = L"今晚 20:00"; }
-        quick[quickN] = Today() + TicksPerDay + 9 * 60 * TicksPerMinute; labels[quickN++] = L"明早 9:00";
-        int x = X;
-        for (int i = 0; i < quickN; i++) { Add(L"BUTTON", labels[i], WS_TABSTOP | BS_PUSHBUTTON, x, y, 84, 28, IdQuick + i); x += 90; }
-        y += 40;
-        date = Add(DATETIMEPICK_CLASSW, L"", WS_TABSTOP | WS_BORDER | DTS_SHORTDATEFORMAT, X, y, 160, 28, IdDate);
-        time = Add(DATETIMEPICK_CLASSW, L"", WS_TABSTOP | WS_BORDER | DTS_TIMEFORMAT | DTS_UPDOWN, X + 170, y, 110, 28, IdTime);
-        SendMessageW(time, DTM_SETFORMATW, 0, (LPARAM)L"HH':'mm");
+        if (tonight > t0 + 5 * TicksPerMinute) { quick[quickN] = tonight; quickLabel[quickN++] = L"今晚"; }
+        quick[quickN] = Today() + TicksPerDay + 9 * 60 * TicksPerMinute; quickLabel[quickN++] = L"明早";
+        // 自定义的初始值：已有提醒就用它，否则一小时后（取整到 5 分钟）
+        Time init = has ? current : minuteNow + 60 * TicksPerMinute;
         SYSTEMTIME st;
-        SplitTime(hasCurrent ? current : minuteNow + 60 * TicksPerMinute, &st);
-        DateTime_SetSystemtime(date, GDT_VALID, &st);
-        DateTime_SetSystemtime(time, GDT_VALID, &st);
-        y += 40;
-        const wchar_t* h = L"到点后会弹出系统通知，条目上的提醒时间变红。程序没开着时错过的提醒，下次打开时补上。";
-        int hh = TextHeightDip(h, CW);
-        Hint(h, X, y, CW, hh);
-        y += hh + 16;
-        Add(L"BUTTON", L"确定", WS_TABSTOP | BS_DEFPUSHBUTTON, X + CW - 176, y, 84, 28, IdOk);
-        Add(L"BUTTON", L"取消", WS_TABSTOP | BS_PUSHBUTTON, X + CW - 84, y, 84, 28, IdCancel);
-        y += 44;
-        SizeClient(W, y);
-        Center();
+        SplitTime(init, &st);
+        int mins = st.wHour * 60 + st.wMinute;
+        if (!has) mins = (mins + 4) / 5 * 5;
+        day = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+        if (mins >= 24 * 60) { mins -= 24 * 60; day += TicksPerDay; }
+        brushRest = CreateSolidBrush(Ui::Ref(Ui::T.inputBg));
+        brushFocus = CreateSolidBrush(Ui::Ref(Ui::T.inputFocusBg));
+        timeEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 10, 10, hwnd,
+                                   (HMENU)100, g_inst, nullptr);
+        Ui::AllowDarkControls(timeEdit);
+        ImmAssociateContextEx(timeEdit, nullptr, 0); // 只输数字，不要输入法（中文标点会把冒号变成全角）
+        SendMessageW(timeEdit, EM_LIMITTEXT, 5, 0);
+        editFont = CreateFontW(-(int)(15 * S() + 0.5f), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        SendMessageW(timeEdit, WM_SETFONT, (WPARAM)editFont, FALSE);
+        HDC dc = GetDC(hwnd);
+        HGDIOBJ of = SelectObject(dc, editFont);
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        editH = tm.tmHeight;
+        SelectObject(dc, of);
+        ReleaseDC(hwnd, dc);
+        SetMinutes(mins);
     }
+
+    // 时间输入框：接受 15:00、15：00、15.00、1500、9
+    int Minutes()
+    {
+        wchar_t buf[16] = {};
+        GetWindowTextW(timeEdit, buf, 16);
+        if (!buf[0]) return -1;
+        int h = -1, m = 0, digits = 0, val = 0, part = 0;
+        for (int i = 0;; i++)
+        {
+            wchar_t c = buf[i];
+            if (c >= L'0' && c <= L'9') { val = val * 10 + (c - L'0'); digits++; continue; }
+            if (c == L':' || c == 0xFF1A || c == L'.' || c == L' ' || c == 0)
+            {
+                if (part == 0) { if (c == 0 && digits >= 3) { h = val / 100; m = val % 100; } else h = val; }
+                else if (part == 1) m = val;
+                part++;
+                val = 0;
+                digits = 0;
+                if (c == 0) break;
+                continue;
+            }
+            return -1;
+        }
+        if (h < 0 || h > 23 || m < 0 || m > 59) return -1;
+        return h * 60 + m;
+    }
+    void SetMinutes(int mins)
+    {
+        Str s;
+        s.Pad2(mins / 60).Ch(L':').Pad2(mins % 60);
+        SetWindowTextW(timeEdit, s.c());
+    }
+    void Step(int delta)
+    {
+        // 对齐到整 15 分钟：往后取下整，往前取上整（14:07 → 14:15 / 14:00）
+        int m = Minutes();
+        if (m < 0) m = 9 * 60;
+        m += delta;
+        if (m < 0) { m += 24 * 60; day -= TicksPerDay; }
+        m = delta > 0 ? m / 15 * 15 : (m + 14) / 15 * 15;
+        if (m >= 24 * 60) { m -= 24 * 60; day += TicksPerDay; }
+        SetMinutes(m);
+        Invalidate();
+    }
+
+    static Str DayText(Time d)
+    {
+        static const wchar_t* wk[7] = { L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六" };
+        SYSTEMTIME st;
+        SplitTime(d, &st);
+        Time today = Today();
+        Str s;
+        if (d == today) s = L"今天 ";
+        else if (d == today + TicksPerDay) s = L"明天 ";
+        else if (d == today + 2 * TicksPerDay) s = L"后天 ";
+        SYSTEMTIME now;
+        GetLocalTime(&now);
+        if (st.wYear != now.wYear) s.Int(st.wYear).Append(L"年");
+        s.Int(st.wMonth).Append(L"月").Int(st.wDay).Append(L"日 ").Append(wk[st.wDayOfWeek % 7]);
+        return s;
+    }
+    static Str WhenText(Time t)
+    {
+        SYSTEMTIME st;
+        SplitTime(t, &st);
+        Time d = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+        Str s;
+        if (d == Today() + TicksPerDay) s = L"明天 ";
+        s.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute);
+        return s;
+    }
+
+    void Push(int id, D2D1_RECT_F r) { Hit h = { id, r }; hits.Push(h); }
+
+    void Build(ID2D1RenderTarget* rt)
+    {
+        hits.Clear();
+        const Ui::Theme& T = Ui::T;
+        const float L = 24, R = Width - 24, CW = R - L;
+        float y = 20;
+        // 条目内容
+        Str quoted = L"「" + itemText + L"」";
+        float th = Ui::MeasureWrap(quoted, CW, 14, 600);
+        if (rt) Ui::TextWrap(rt, quoted, L, y, CW, 14, 600, T.text);
+        y += th + 18;
+
+        // 快捷选项：两列，每格上面是说法、下面是具体时间
+        if (rt) Ui::Text(rt, Str(L"快速选择"), D2D1::RectF(L, y, R, y + 18), 12, 400, T.text2);
+        y += 18 + 8;
+        float qw = (CW - 8) / 2, qh = 52;
+        for (int i = 0; i < quickN; i++)
+        {
+            float x = L + (i % 2) * (qw + 8), qy = y + (i / 2) * (qh + 8);
+            D2D1_RECT_F r = D2D1::RectF(x, qy, x + qw, qy + qh);
+            Push(HQuick + i, r);
+            if (!rt) continue;
+            bool hot = hover == HQuick + i, down = press == HQuick + i;
+            Ui::Fill(rt, r, 6, Ui::Solid(down ? T.ctrlPress : hot ? T.ctrlHover : T.ctrlFill, T.winBg));
+            Ui::Stroke(rt, r, 6, hot ? (T.accent & 0x00FFFFFF) | 0x80000000 : T.ctrlBorder, 1);
+            Ui::Text(rt, Str(quickLabel[i]), D2D1::RectF(x + 14, qy + 7, x + qw - 14, qy + 27), 14, 400, T.text);
+            Ui::Text(rt, WhenText(quick[i]), D2D1::RectF(x + 14, qy + 27, x + qw - 14, qy + 45), 12, 400, T.text2);
+        }
+        y += ((quickN + 1) / 2) * (qh + 8) + 10;
+
+        // 自定义：日期（前一天 / 后一天）+ 时间（输入框，±15 分钟）
+        if (rt) Ui::Text(rt, Str(L"自定义"), D2D1::RectF(L, y, R, y + 18), 12, 400, T.text2);
+        y += 18 + 8;
+        D2D1_RECT_F card = D2D1::RectF(L, y, R, y + 56);
+        if (rt) { Ui::Fill(rt, card, 6, T.cardBg); Ui::Stroke(rt, card, 6, T.cardBorder, 1); }
+        float cy = y + 28;
+        // 时间部分在右边
+        D2D1_RECT_F plus = D2D1::RectF(R - 10 - 32, cy - 16, R - 10, cy + 16);
+        timeFrame = D2D1::RectF(plus.left - 4 - 72, cy - 16, plus.left - 4, cy + 16);
+        D2D1_RECT_F minus = D2D1::RectF(timeFrame.left - 4 - 32, cy - 16, timeFrame.left - 4, cy + 16);
+        timeRow = D2D1::RectF(minus.left, card.top, R, card.bottom);
+        // 日期部分在左边
+        D2D1_RECT_F prev = D2D1::RectF(L + 10, cy - 16, L + 10 + 32, cy + 16);
+        D2D1_RECT_F next = D2D1::RectF(minus.left - 16 - 32, cy - 16, minus.left - 16, cy + 16);
+        dateRow = D2D1::RectF(L, card.top, next.right, card.bottom);
+        bool canPrev = day > Today();
+        if (canPrev) Push(HPrevDay, prev);
+        Push(HNextDay, next);
+        Push(HMinus, minus);
+        Push(HPlus, plus);
+        if (rt)
+        {
+            if (canPrev) DrawBtn(rt, prev, Str(), 0xE76B, 2, hover == HPrevDay, press == HPrevDay, T.cardBg);
+            else Ui::Icon(rt, 0xE76B, (prev.left + prev.right) / 2, cy, 14, T.disabled);
+            DrawBtn(rt, next, Str(), 0xE76C, 2, hover == HNextDay, press == HNextDay, T.cardBg);
+            Ui::Text(rt, DayText(day), D2D1::RectF(prev.right + 4, cy - 12, next.left - 4, cy + 12), 14, 400, T.text, Ui::Center);
+            DrawBtn(rt, minus, Str(), 0xE738, 2, hover == HMinus, press == HMinus, T.cardBg);
+            DrawBtn(rt, plus, Str(), 0xE710, 2, hover == HPlus, press == HPlus, T.cardBg);
+            bool f = GetFocus() == timeEdit;
+            Ui::Fill(rt, timeFrame, 4, f ? T.inputFocusBg : T.inputBg);
+            Ui::Stroke(rt, timeFrame, 4, T.ctrlBorder, 1);
+            if (f) Ui::Fill(rt, D2D1::RectF(timeFrame.left + 1, timeFrame.bottom - 2, timeFrame.right - 1, timeFrame.bottom), 1, T.accent);
+            else Ui::Line(rt, timeFrame.left + 3, timeFrame.bottom - 0.5f, timeFrame.right - 3, timeFrame.bottom - 0.5f, T.strong, 1);
+        }
+        y += 56 + 8;
+        // 状态：时间写错了 / 已经过了
+        int mins = Minutes();
+        Str status;
+        u32 sc = T.text2;
+        if (mins < 0) { status = L"时间格式不对，例如 15:30"; sc = T.critical; }
+        else if (day + mins * TicksPerMinute <= Now()) { status = L"这个时间已经过了，确定后会马上提醒"; sc = T.critical; }
+        else status = L"到点后弹出系统通知，条目上的提醒标签变红；程序没开着时错过的提醒，下次打开时补上。";
+        float sh = Ui::MeasureWrap(status, CW, 12, 400);
+        if (rt) Ui::TextWrap(rt, status, L, y, CW, 12, 400, sc);
+        y += sh + 20;
+
+        // 底部按钮
+        float bw = 88;
+        D2D1_RECT_F ok = D2D1::RectF(R - bw, y, R, y + 32), cancel = D2D1::RectF(R - 2 * bw - 8, y, R - bw - 8, y + 32);
+        if (mins >= 0) Push(HOk, ok);
+        Push(HCancel, cancel);
+        Str removeText(L"移除提醒");
+        D2D1_RECT_F remove = D2D1::RectF(L - 8, y, L - 8 + Ui::Measure(removeText, 14, 400) + 16, y + 32);
+        if (hasCurrent) Push(HRemove, remove);
+        if (rt)
+        {
+            if (mins >= 0) DrawBtn(rt, ok, Str(L"确定"), 0, 1, hover == HOk, press == HOk, T.winBg);
+            else { Ui::Fill(rt, ok, 4, T.disabled); Ui::Text(rt, Str(L"确定"), ok, 14, 400, T.onAccent, Ui::Center); }
+            DrawBtn(rt, cancel, Str(L"取消"), 0, 0, hover == HCancel, press == HCancel, T.winBg);
+            if (hasCurrent)
+            {
+                if (hover == HRemove) Ui::Fill(rt, remove, 4, press == HRemove ? T.subtlePress : T.subtleHover);
+                Ui::Text(rt, removeText, remove, 14, 400, T.critical, Ui::Center);
+            }
+        }
+        y += 32 + 20;
+        contentH = y;
+    }
+
+    void PlaceEdit()
+    {
+        float s = S();
+        int x = (int)((timeFrame.left + 6) * s), w = (int)((timeFrame.right - 6) * s) - x;
+        int cy = (int)((timeFrame.top + timeFrame.bottom) / 2 * s);
+        MoveWindow(timeEdit, x, cy - editH / 2, w, editH, TRUE);
+    }
+
+    void Paint()
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        Canvas c;
+        if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
+        {
+            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
+            c.rt->Clear(&bg);
+            Build(c.rt);
+        }
+        c.EndBlt(dc);
+        EndPaint(hwnd, &ps);
+    }
+
+    int HitAt(int px, int py)
+    {
+        float x = px / S(), y = py / S();
+        for (int i = hits.n - 1; i >= 0; i--)
+        {
+            const D2D1_RECT_F& r = hits[i].r;
+            if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return hits[i].id;
+        }
+        return 0;
+    }
+
+    void Activate(int id)
+    {
+        if (id >= HQuick && id < HQuick + quickN) { result = 1; resultTime = quick[id - HQuick]; done = true; return; }
+        switch (id)
+        {
+        case HPrevDay: if (day > Today()) day -= TicksPerDay; break;
+        case HNextDay: day += TicksPerDay; break;
+        case HMinus: Step(-15); break;
+        case HPlus: Step(15); break;
+        case HOk:
+        {
+            int m = Minutes();
+            if (m < 0) { SetFocus(timeEdit); break; }
+            result = 1;
+            resultTime = day + m * TicksPerMinute;
+            done = true;
+            break;
+        }
+        case HCancel: done = true; break;
+        case HRemove: result = 2; done = true; break;
+        }
+        Invalidate();
+    }
+
     static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
     {
-        ReminderDlg* self = (ReminderDlg*)GetWindowLongPtrW(h, GWLP_USERDATA);
+        ReminderWin* self = (ReminderWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
         if (m == WM_NCCREATE)
         {
-            self = (ReminderDlg*)((CREATESTRUCTW*)l)->lpCreateParams;
+            self = (ReminderWin*)((CREATESTRUCTW*)l)->lpCreateParams;
             self->hwnd = h;
             SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
         }
         if (!self) return DefWindowProcW(h, m, w, l);
-        LRESULT r;
-        if (self->Common(m, w, l, &r)) return r;
-        if (m == WM_COMMAND)
+        switch (m)
         {
-            int id = LOWORD(w);
-            if (id >= IdQuick && id < IdQuick + self->quickN) { self->result = self->quick[id - IdQuick]; self->ok = true; self->done = true; }
-            else if (id == IdOk || id == IDOK)
+        case WM_PAINT: self->Paint(); return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_CTLCOLOREDIT:
+        {
+            bool f = GetFocus() == (HWND)l;
+            u32 bg = f ? Ui::T.inputFocusBg : Ui::T.inputBg;
+            SetTextColor((HDC)w, Ui::Ref(Ui::Solid(Ui::T.text, bg)));
+            SetBkColor((HDC)w, Ui::Ref(bg));
+            return (LRESULT)(f ? self->brushFocus : self->brushRest);
+        }
+        case WM_MOUSEMOVE:
+        {
+            if (!self->tracking)
             {
-                SYSTEMTIME d, t;
-                DateTime_GetSystemtime(self->date, &d);
-                DateTime_GetSystemtime(self->time, &t);
-                self->result = MakeTime(d.wYear, d.wMonth, d.wDay, t.wHour, t.wMinute, 0);
-                self->ok = true;
-                self->done = true;
+                TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
+                TrackMouseEvent(&t);
+                self->tracking = true;
             }
-            else if (id == IdCancel || id == IDCANCEL) self->done = true;
+            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            if (id != self->hover) { self->hover = id; self->Invalidate(); }
             return 0;
         }
-        if (m == WM_CLOSE) { self->done = true; return 0; }
+        case WM_MOUSELEAVE:
+            self->tracking = false;
+            self->hover = 0;
+            self->Invalidate();
+            return 0;
+        case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
+            self->press = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            if (self->press) SetCapture(h);
+            self->Invalidate();
+            return 0;
+        case WM_LBUTTONUP:
+        {
+            int p = self->press;
+            self->press = 0;
+            if (GetCapture() == h) ReleaseCapture();
+            if (p && self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l)) == p) self->Activate(p);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+        {
+            // 滚轮：在日期上换天，在时间上 ±15 分钟
+            POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+            ScreenToClient(h, &p);
+            float x = p.x / self->S(), y = p.y / self->S();
+            int dir = GET_WHEEL_DELTA_WPARAM(w) > 0 ? 1 : -1;
+            const D2D1_RECT_F& dr = self->dateRow;
+            const D2D1_RECT_F& tr = self->timeRow;
+            if (x >= dr.left && x < dr.right && y >= dr.top && y < dr.bottom)
+            {
+                if (dir > 0) self->day += TicksPerDay;
+                else if (self->day > Today()) self->day -= TicksPerDay;
+                self->Invalidate();
+            }
+            else if (x >= tr.left && x < tr.right && y >= tr.top && y < tr.bottom) self->Step(dir * 15);
+            return 0;
+        }
+        case WM_COMMAND:
+        {
+            int id = LOWORD(w), code = HIWORD(w);
+            if (id == 100 && (code == EN_SETFOCUS || code == EN_KILLFOCUS || code == EN_CHANGE))
+            {
+                self->Invalidate();
+                if (code != EN_CHANGE) InvalidateRect((HWND)l, nullptr, TRUE);
+                return 0;
+            }
+            if (id == IDOK) self->Activate(HOk);
+            else if (id == IDCANCEL) self->done = true;
+            return 0;
+        }
+        case WM_DPICHANGED:
+        {
+            self->dpi = HIWORD(w);
+            RECT* rc = (RECT*)l;
+            SetWindowPos(h, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            self->PlaceEdit();
+            self->Invalidate();
+            return 0;
+        }
+        case WM_CLOSE: self->done = true; return 0;
+        }
         return DefWindowProcW(h, m, w, l);
     }
 };
 
-bool ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result)
+int ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result)
 {
-    ReminderDlg d;
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_TOPMOST, L"DeskNoteReminder", L"设置提醒", WS_CAPTION | WS_SYSMENU,
+    Ui::LoadTheme();
+    ReminderWin d;
+    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, L"DeskNoteReminder", L"设置提醒", WS_CAPTION | WS_SYSMENU,
                              CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, owner, nullptr, g_inst, &d);
     d.dpi = GetDpiForWindow(h);
-    SetIcons(h);
-    d.Build(itemText, hasCurrent, current);
+    ApplyFrameTheme(h);
+    d.Init(itemText, hasCurrent, current);
+    d.Build(nullptr);
+    // 放在鼠标所在屏幕的中间
+    POINT p;
+    GetCursorPos(&p);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
+    float S = d.S();
+    RECT r = { 0, 0, (int)(ReminderWin::Width * S + 0.5f), (int)(d.contentH * S + 0.5f) };
+    AdjustWindowRectExForDpi(&r, GetWindowLongW(h, GWL_STYLE), FALSE, GetWindowLongW(h, GWL_EXSTYLE), d.dpi);
+    int w = r.right - r.left, ht = r.bottom - r.top;
+    SetWindowPos(h, nullptr, (mi.rcWork.left + mi.rcWork.right - w) / 2, (mi.rcWork.top + mi.rcWork.bottom - ht) / 2, w, ht, SWP_NOZORDER | SWP_NOACTIVATE);
+    d.PlaceEdit();
     RunModal(h, owner, &d.done);
-    if (d.ok) *result = d.result;
-    return d.ok;
+    if (d.editFont) DeleteObject(d.editFont);
+    if (d.brushRest) DeleteObject(d.brushRest);
+    if (d.brushFocus) DeleteObject(d.brushFocus);
+    if (d.result == 1) *result = d.resultTime;
+    return d.result;
 }
 
 void RegisterDialogClasses()
@@ -1320,9 +1576,9 @@ void RegisterDialogClasses()
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
-    wc.lpfnWndProc = ReminderDlg::Proc; wc.lpszClassName = L"DeskNoteReminder"; RegisterClassW(&wc);
     wc.style = CS_DBLCLKS;
     wc.hbrBackground = nullptr;
     wc.lpfnWndProc = SettingsWin::Proc; wc.lpszClassName = L"DeskNoteSettings"; RegisterClassW(&wc);
     wc.lpfnWndProc = TrashWin::Proc; wc.lpszClassName = L"DeskNoteTrash"; RegisterClassW(&wc);
+    wc.lpfnWndProc = ReminderWin::Proc; wc.lpszClassName = L"DeskNoteReminder"; RegisterClassW(&wc);
 }

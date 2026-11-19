@@ -1695,11 +1695,12 @@ void NoteWin::EditReminder(int index)
     if (index < 0 || index >= d->items.n) return;
     NoteItem cur = d->items[index];
     Time t;
-    if (!ReminderDialog(hwnd, cur.text, cur.hasRemind, cur.remind, &t)) { SendToBottom(); return; }
+    int r = ReminderDialog(hwnd, cur.text, cur.hasRemind, cur.remind, &t);
+    if (!r) { SendToBottom(); return; }
     if (index >= d->items.n || d->items[index].text != cur.text) return; // 对话框开着时条目被别处改了
     BeginChange();
-    d->items[index].hasRemind = true;
-    d->items[index].remind = t;
+    d->items[index].hasRemind = r == 1;
+    if (r == 1) d->items[index].remind = t;
     d->items[index].reminded = false;
     Save();
     EndChange();

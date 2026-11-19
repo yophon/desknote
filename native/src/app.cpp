@@ -91,24 +91,6 @@ NoteWin* App::Find(const Str& id)
     return nullptr;
 }
 
-HFONT App::UiFont(int dpi)
-{
-    if (uiFont && uiFontDpi == dpi) return uiFont;
-    if (uiFont) DeleteObject(uiFont);
-    uiFont = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-    uiFontDpi = dpi;
-    return uiFont;
-}
-
-HFONT App::UiFontBold(int dpi)
-{
-    if (uiFontBold && uiFontBoldDpi == dpi) return uiFontBold;
-    if (uiFontBold) DeleteObject(uiFontBold);
-    uiFontBold = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-    uiFontBoldDpi = dpi;
-    return uiFontBold;
-}
-
 // =====================================================================
 // 便签增删
 // =====================================================================
@@ -612,6 +594,7 @@ extern "C" void __stdcall Start()
     else if (open.Eq(L"edit") && g_app->notes.n) g_app->notes[0]->BeginEdit(0);            // 调界面用
     else if (open.Eq(L"capsule") && g_app->notes.n) g_app->notes[0]->Collapse();
     else if (open.Eq(L"preview") && g_app->notes.n) g_app->notes[0]->DebugPreview();
+    else if (open.Eq(L"reminder") && g_app->notes.n) g_app->notes[0]->DebugReminder(2);
     else if (open.Eq(L"hover") && g_app->notes.n) g_app->notes[0]->DebugHover(1, 2);
     else if (open.StartsWith(L"menu") && g_app->notes.n) g_app->notes[0]->DebugMenu((int)ParseInt(open.Sub(4), 0));
     else if (open.Eq(L"traymenu"))
