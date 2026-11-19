@@ -156,7 +156,7 @@ namespace DeskNote
             }
             auto.Click += delegate { DeskApp.SetAutoStart(auto.IsChecked == true); };
             root.Children.Add(auto);
-            root.Children.Add(Hint("开机启动记录的是程序现在的位置，移动 exe 后要重新勾选一次。"));
+            root.Children.Add(Hint("移动 exe 后，打开一次新位置的 exe，开机启动会自动改到新位置。"));
 
             // ---- 快捷键 ----
             root.Children.Add(Section("全局快捷键"));
@@ -218,12 +218,36 @@ namespace DeskNote
             dirRow.Children.Add(new TextBox { Text = Store.Dir, IsReadOnly = true, BorderThickness = new Thickness(0), Background = Brushes.Transparent, VerticalAlignment = VerticalAlignment.Center });
             root.Children.Add(dirRow);
             root.Children.Add(Hint("每张便签一个 json 文件，在 notes 文件夹里；回收站是 trash.json。"));
+            var backupRow = new DockPanel { Margin = new Thickness(0, 8, 0, 0) };
+            var openBackup = Ui.Btn("打开备份", delegate
+            {
+                System.IO.Directory.CreateDirectory(Store.BackupsDir);
+                Process.Start("explorer.exe", Store.BackupsDir);
+            });
+            DockPanel.SetDock(openBackup, Dock.Right);
+            backupRow.Children.Add(openBackup);
+            backupRow.Children.Add(new TextBlock
+            {
+                Text = "每天自动备份一次，保留最近 " + Store.KeepBackups + " 天。要找回某天的内容，把备份里的文件复制回 notes 文件夹即可。",
+                Foreground = Ui.Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center
+            });
+            root.Children.Add(backupRow);
 
+            // ---- 同步 ----
+            root.Children.Add(Section("同步到 gopan"));
+            root.Children.Add(new SyncPanel(app));
+
+            var bottom = new DockPanel { Margin = new Thickness(0, 18, 0, 0) };
             var close = Ui.Btn("关闭", Close);
-            close.HorizontalAlignment = HorizontalAlignment.Right;
-            close.Margin = new Thickness(0, 18, 0, 0);
-            close.IsDefault = false;
-            root.Children.Add(close);
+            DockPanel.SetDock(close, Dock.Right);
+            bottom.Children.Add(close);
+            var bt = DeskApp.BuildTime;
+            bottom.Children.Add(new TextBlock
+            {
+                Text = "DeskNote " + DeskApp.Version + (bt > DateTime.MinValue ? " · 编译于 " + bt.ToString("yyyy-MM-dd HH:mm") : ""),
+                Foreground = Ui.Muted, FontSize = 12, VerticalAlignment = VerticalAlignment.Center
+            });
+            root.Children.Add(bottom);
 
             Content = root;
             ShowStatus(app.ApplyHotkey());
@@ -236,14 +260,178 @@ namespace DeskNote
             hotkeyStatus.Text = err == null ? "已生效：" + app.Settings.Hotkey : err;
         }
 
-        static TextBlock Section(string text)
+        internal static TextBlock Section(string text)
         {
             return new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, FontSize = 14.5, Margin = new Thickness(0, 14, 0, 8) };
         }
 
-        static TextBlock Hint(string text)
+        internal static TextBlock Hint(string text)
         {
             return new TextBlock { Text = text, Foreground = Ui.Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0) };
+        }
+    }
+    // ---------------------------------------------------------------------
+    // 设置提醒：日期 + 时间，外加几个常用的快捷选项
+    // ---------------------------------------------------------------------
+    class ReminderDialog : Window
+    {
+        public DateTime? Result;
+        readonly DatePicker date = new DatePicker { Width = 150, Margin = new Thickness(0, 0, 10, 0) };
+        readonly TextBox time = new TextBox { Width = 70, Padding = new Thickness(4, 3, 4, 3), VerticalContentAlignment = VerticalAlignment.Center };
+        readonly TextBlock error = new TextBlock { Foreground = Brushes.IndianRed, Margin = new Thickness(0, 6, 0, 0) };
+
+        public ReminderDialog(string itemText, DateTime? current)
+        {
+            Title = "设置提醒";
+            Width = 400;
+            SizeToContent = SizeToContent.Height;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            Topmost = true;
+            FontFamily = Ui.Font;
+            FontSize = 13.5;
+
+            var root = new StackPanel { Margin = new Thickness(20, 16, 20, 16) };
+            string shown = itemText.Replace("\n", " ");
+            if (shown.Length > 80) shown = shown.Substring(0, 80) + "…";
+            root.Children.Add(new TextBlock { Text = shown, TextWrapping = TextWrapping.Wrap, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 12) });
+
+            var quick = new WrapPanel { Margin = new Thickness(0, 0, 0, 10) };
+            var now = DateTime.Now;
+            AddQuick(quick, "30 分钟后", now.AddMinutes(30));
+            AddQuick(quick, "1 小时后", now.AddHours(1));
+            var tonight = DateTime.Today.AddHours(20);
+            if (tonight > now.AddMinutes(5)) AddQuick(quick, "今晚 20:00", tonight);
+            AddQuick(quick, "明早 9:00", DateTime.Today.AddDays(1).AddHours(9));
+            root.Children.Add(quick);
+
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            row.Children.Add(date);
+            row.Children.Add(time);
+            root.Children.Add(row);
+            root.Children.Add(error);
+            root.Children.Add(SettingsWindow.Hint("到点后会弹出系统通知，条目上的提醒时间变红。程序没开着时错过的提醒，下次打开时补上。"));
+
+            var t0 = current ?? DateTime.Now.AddHours(1);
+            date.SelectedDate = t0.Date;
+            time.Text = t0.ToString("HH:mm");
+
+            var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
+            var ok = Ui.Btn("确定", delegate { Confirm(); });
+            ok.IsDefault = true;
+            var cancel = Ui.Btn("取消", delegate { DialogResult = false; });
+            cancel.IsCancel = true;
+            btns.Children.Add(ok);
+            btns.Children.Add(cancel);
+            root.Children.Add(btns);
+            Content = root;
+            Loaded += delegate { time.Focus(); time.SelectAll(); };
+        }
+
+        void AddQuick(Panel p, string label, DateTime t)
+        {
+            var minute = new DateTime(t.Year, t.Month, t.Day, t.Hour, t.Minute, 0);
+            var b = Ui.Btn(label, delegate { Result = minute; DialogResult = true; });
+            b.Margin = new Thickness(0, 0, 6, 6);
+            p.Children.Add(b);
+        }
+
+        void Confirm()
+        {
+            DateTime tm;
+            string s = time.Text.Trim().Replace("：", ":");
+            if (!date.SelectedDate.HasValue) { error.Text = "请选择日期"; return; }
+            if (!DateTime.TryParseExact(s, new[] { "H:mm", "HH:mm", "H", "HHmm" }, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out tm)) { error.Text = "时间格式像 9:30 或 21:05"; return; }
+            Result = date.SelectedDate.Value.Date.Add(tm.TimeOfDay);
+            DialogResult = true;
+        }
+    }
+    // ---------------------------------------------------------------------
+    // 设置里的“同步到 gopan”一栏
+    // ---------------------------------------------------------------------
+    class SyncPanel : StackPanel
+    {
+        readonly DeskApp app;
+        readonly TextBlock status = new TextBlock { FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0) };
+
+        public SyncPanel(DeskApp app)
+        {
+            this.app = app;
+            var s = app.Settings;
+            var enable = new CheckBox { Content = "启用同步（多台电脑共用这些便签）", IsChecked = s.SyncEnabled };
+            var server = Field(s.SyncServer);
+            var folder = Field(s.SyncFolder);
+            var key = new PasswordBox { Padding = new Thickness(4, 3, 4, 3) };
+            var keyHint = new TextBlock
+            {
+                Text = s.SyncKey.Length > 0 ? "已保存（不改就留空）" : "", Foreground = Ui.Muted, FontSize = 12,
+                IsHitTestVisible = false, Margin = new Thickness(7, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center
+            };
+            key.PasswordChanged += delegate { keyHint.Visibility = key.Password.Length > 0 ? Visibility.Collapsed : Visibility.Visible; };
+            var keyBox = new Grid();
+            keyBox.Children.Add(key);
+            keyBox.Children.Add(keyHint);
+
+            var grid = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition());
+            AddRow(grid, 0, "服务器", server);
+            AddRow(grid, 1, "密钥", keyBox);
+            AddRow(grid, 2, "文件夹", folder);
+
+            var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
+            var save = Ui.Btn("保存并立即同步", delegate
+            {
+                s.SyncEnabled = enable.IsChecked == true;
+                s.SyncServer = server.Text.Trim().TrimEnd('/');
+                if (s.SyncServer.Length > 0 && !s.SyncServer.StartsWith("http", StringComparison.OrdinalIgnoreCase)) s.SyncServer = "https://" + s.SyncServer;
+                server.Text = s.SyncServer;
+                s.SyncFolder = Syncer.NormFolder(folder.Text);
+                folder.Text = s.SyncFolder;
+                if (key.Password.Length > 0) { s.SyncKey = key.Password.Trim(); key.Password = ""; keyHint.Text = "已保存（不改就留空）"; }
+                Store.SaveSettings(s);
+                app.Sync.Start();
+                app.Sync.SyncNow();
+            });
+            save.Margin = new Thickness(0);
+            btns.Children.Add(save);
+
+            Children.Add(enable);
+            Children.Add(grid);
+            Children.Add(btns);
+            Children.Add(status);
+            Children.Add(SettingsWindow.Hint(
+                "在 gopan 网页的「Agent 接入」里新建一把密钥，权限勾选：浏览与搜索、读取与下载内容、新建重命名移动与复制、移入回收站与恢复。" +
+                "每张便签存成文件夹里的一个 json；只同步内容和外观，窗口位置、回收站各台电脑自己管。" +
+                "两台电脑同时改了同一张便签时，本地那份会另存成一张「冲突副本」，不会丢。"));
+
+            Action refresh = delegate
+            {
+                status.Text = app.Sync.Status;
+                status.Foreground = app.Sync.LastFailed ? (Brush)Brushes.IndianRed : Ui.Muted;
+            };
+            app.Sync.StatusChanged += refresh;
+            Unloaded += delegate { app.Sync.StatusChanged -= refresh; };
+            refresh();
+        }
+
+        static TextBox Field(string text)
+        {
+            return new TextBox { Text = text, Padding = new Thickness(4, 3, 4, 3) };
+        }
+
+        static void AddRow(Grid g, int row, string label, UIElement field)
+        {
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var l = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 3, 10, 3) };
+            Grid.SetRow(l, row);
+            g.Children.Add(l);
+            var fe = (FrameworkElement)field;
+            fe.Margin = new Thickness(0, 3, 0, 3);
+            Grid.SetRow(fe, row);
+            Grid.SetColumn(fe, 1);
+            g.Children.Add(fe);
         }
     }
 }

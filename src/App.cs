@@ -14,16 +14,24 @@ using Microsoft.Win32;
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
 [assembly: AssemblyTitle("DeskNote")]
 [assembly: AssemblyProduct("DeskNote")]
+[assembly: AssemblyVersion(DeskNote.DeskApp.Version + ".0")]
+[assembly: AssemblyFileVersion(DeskNote.DeskApp.Version + ".0")]
 
 namespace DeskNote
 {
     class DeskApp
     {
+        // 改版本号就改这里（major.minor.patch）
+        public const string Version = "1.2.0";
+        // 编译时间：取 exe 文件的修改时间
+        public static DateTime BuildTime { get { try { return File.GetLastWriteTime(Assembly.GetExecutingAssembly().Location); } catch { return DateTime.MinValue; } } }
+
         public readonly List<NoteWindow> Notes = new List<NoteWindow>();
         public List<TrashEntry> Trash;
         public GlobalSettings Settings;
         public ImageSource WindowIcon;
         public event Action TrashChanged;
+        public Syncer Sync;
         public readonly bool IsDefaultDataDir;
 
         readonly Application wpf;
@@ -70,13 +78,57 @@ namespace DeskNote
                 list.Add(n);
             }
             foreach (var n in list) OpenWindow(n);
+            Store.DailyBackup();
 
             CreateTray();
             CreateMessageWindow();
             ApplyHotkey();
             WatchNotes();
+            Sync = new Syncer(this, wpf.Dispatcher);
+            Sync.Start();
             // 程序失去焦点（点了别处）时结束“临时提到最前”
             wpf.Deactivated += delegate { if (peeking) EndPeek(); };
+
+            // 每 15 秒检查一次到点的提醒；顺便每天做一次备份（程序可能连开好几天）
+            var tick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+            tick.Tick += delegate { CheckReminders(); if (DateTime.Now.Minute == 0 || lastBackupDay != DateTime.Today) { lastBackupDay = DateTime.Today; Store.DailyBackup(); } };
+            tick.Start();
+            CheckReminders(); // 关机期间错过的提醒，启动后马上补
+        }
+
+        DateTime lastBackupDay = DateTime.Today;
+
+        // ---------------------------------------------------------------
+        // 提醒：到点后弹系统通知，条目上的提醒标记变红
+        // ---------------------------------------------------------------
+        NoteWindow balloonNote;
+
+        public void CheckReminders()
+        {
+            var now = DateTime.Now;
+            foreach (var w in Notes.ToArray())
+            {
+                var due = new List<NoteItem>();
+                foreach (var it in w.Data.Items)
+                    if (it.Remind.HasValue && !it.Reminded && !it.Done && it.Remind.Value <= now) due.Add(it);
+                if (due.Count == 0) continue;
+                foreach (var it in due) it.Reminded = true;
+                w.OnRemindersFired();
+                var first = due[0];
+                string text = first.Text.Replace("\n", " ");
+                if (text.Length > 60) text = text.Substring(0, 60) + "…";
+                if (due.Count > 1) text += "（另有 " + (due.Count - 1) + " 条）";
+                ShowNotice("提醒 · " + w.Data.Title, text, w);
+            }
+        }
+
+        public bool Silent; // 自测时不弹系统通知
+
+        public void ShowNotice(string title, string text, NoteWindow w)
+        {
+            if (Silent) return;
+            balloonNote = w;
+            if (tray != null) tray.ShowBalloonTip(10000, title, text, System.Windows.Forms.ToolTipIcon.Info);
         }
 
         NoteWindow OpenWindow(NoteData n)
@@ -88,6 +140,26 @@ namespace DeskNote
         }
 
         public int NoteIndex(NoteWindow w) { return Math.Max(0, Notes.IndexOf(w)); }
+
+        // 便签内容存盘后通知同步（内容没变的话同步器自己会忽略）
+        public void OnNoteSaved() { if (Sync != null) Sync.Touch(); }
+
+        // 同步拉下来一张本地没有的便签
+        public void OpenSyncedNote(NoteData n)
+        {
+            Store.Revive(n.Id);
+            Store.SaveNote(n);
+            OpenWindow(n);
+        }
+
+        // 同步冲突时，把本地那份另存成一张新便签
+        public void CreateNoteFromContent(string contentJson, string titleSuffix)
+        {
+            var n = NoteData.FromContentJson(contentJson, NoteData.NewId());
+            n.Title += titleSuffix;
+            Store.SaveNote(n);
+            OpenWindow(n);
+        }
 
         static ImageSource LoadWindowIcon()
         {
@@ -117,11 +189,16 @@ namespace DeskNote
             w.BeginEdit(0);
         }
 
-        public void DeleteNote(NoteWindow w)
+        public void DeleteNote(NoteWindow w) { DeleteNote(w, true); }
+
+        public void DeleteNote(NoteWindow w, bool confirm)
         {
-            var r = MessageBox.Show("把便签「" + w.Data.Title + "」（" + w.Data.Items.Count + " 条）移到回收站？\n之后可以在回收站里恢复。",
-                "删除便签", MessageBoxButton.OKCancel, MessageBoxImage.Question);
-            if (r != MessageBoxResult.OK) return;
+            if (confirm)
+            {
+                var r = MessageBox.Show("把便签「" + w.Data.Title + "」（" + w.Data.Items.Count + " 条）移到回收站？\n之后可以在回收站里恢复。",
+                    "删除便签", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+                if (r != MessageBoxResult.OK) return;
+            }
             w.SaveLayout();
             w.Deleted = true;
             Trash.Insert(0, new TrashEntry { Kind = "note", Note = w.Data });
@@ -130,14 +207,32 @@ namespace DeskNote
             Store.DeleteNoteFile(w.Data.Id);
             w.AllowClose = true;
             w.Close();
+            OnNoteSaved();
         }
 
         // ---------------------------------------------------------------
         // 回收站
         // ---------------------------------------------------------------
-        public void TrashItem(NoteData note, int index, NoteItem item)
+        public TrashEntry TrashItem(NoteData note, int index, NoteItem item)
         {
-            Trash.Insert(0, new TrashEntry { Kind = "item", NoteId = note.Id, NoteTitle = note.Title, Index = index, Item = item.Clone() });
+            var e = new TrashEntry { Kind = "item", NoteId = note.Id, NoteTitle = note.Title, Index = index, Item = item.Clone() };
+            Trash.Insert(0, e);
+            SaveTrash();
+            return e;
+        }
+
+        // 撤销删除时把对应的回收站记录拿掉；重做时放回去
+        public void UntrashEntries(List<TrashEntry> list)
+        {
+            if (list.Count == 0) return;
+            foreach (var e in list) Trash.Remove(e);
+            SaveTrash();
+        }
+
+        public void RetrashEntries(List<TrashEntry> list)
+        {
+            if (list.Count == 0) return;
+            foreach (var e in list) if (!Trash.Contains(e)) Trash.Insert(0, e);
             SaveTrash();
         }
 
@@ -159,6 +254,7 @@ namespace DeskNote
             {
                 var n = e.Note;
                 if (FindNote(n.Id) != null || File.Exists(Store.NotePath(n.Id))) n.Id = NoteData.NewId();
+                Store.Revive(n.Id);
                 Store.SaveNote(n);
                 OpenWindow(n);
             }
@@ -227,6 +323,8 @@ namespace DeskNote
             Native.SetForegroundWindow(new WindowInteropHelper(last).Handle);
         }
 
+        void TogglePeekIfNot() { if (!peeking) TogglePeek(); }
+
         void EndPeek()
         {
             peeking = false;
@@ -243,7 +341,7 @@ namespace DeskNote
         // ---------------------------------------------------------------
         void CreateTray()
         {
-            tray = new System.Windows.Forms.NotifyIcon { Text = "DeskNote", Visible = true };
+            tray = new System.Windows.Forms.NotifyIcon { Text = "DeskNote " + Version, Visible = true };
             try
             {
                 using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("DeskNote.ico"))
@@ -261,6 +359,8 @@ namespace DeskNote
             menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
             menu.Items.Add("退出", null, delegate { Exit(); });
             tray.ContextMenuStrip = menu;
+            // 点通知：把那张便签提到最前
+            tray.BalloonTipClicked += delegate { if (balloonNote != null && Notes.Contains(balloonNote)) { balloonNote.Expand(); TogglePeekIfNot(); } };
             tray.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e)
             {
                 if (e.Button == System.Windows.Forms.MouseButtons.Left) TogglePeek();
@@ -327,7 +427,7 @@ namespace DeskNote
             if (fresh == null) return;
             var w = FindNote(id);
             if (w != null) w.ReloadFrom(fresh);
-            else OpenWindow(fresh); // 外部放进来的新便签文件
+            else if (!Store.IsDeleted(id)) OpenWindow(fresh); // 外部放进来的新便签文件
         }
 
         // ---------------------------------------------------------------
@@ -431,11 +531,16 @@ namespace DeskNote
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DeskNote");
             bool isDefault = true;
             string open = null; // --open trash|settings：启动后直接打开回收站或设置
+            string testPhase = null, testOut = null, syncServer = null, syncKey = null; // --selftest <阶段> <结果文件>：见 SelfTest.cs
             for (int i = 0; i + 1 < args.Length; i++)
             {
                 if (args[i] == "--data") { dir = Path.GetFullPath(args[i + 1]); isDefault = false; }
                 if (args[i] == "--open") open = args[i + 1];
+                if (args[i] == "--selftest" && i + 2 < args.Length) { testPhase = args[i + 1]; testOut = Path.GetFullPath(args[i + 2]); }
+                if (args[i] == "--sync-server") syncServer = args[i + 1];
+                if (args[i] == "--sync-key") syncKey = args[i + 1];
             }
+            if (testPhase != null && isDefault) return; // 自测只许在 --data 指定的测试目录里跑
             Store.Init(dir);
 
             // 单实例：同一个数据目录只开一个；再次启动时让已开的那个把便签提到最前
@@ -461,9 +566,14 @@ namespace DeskNote
                 var app = new DeskApp(wpf, isDefault);
                 wpf.Startup += delegate
                 {
+                    app.Silent = testPhase != null;
                     app.Start();
                     if (open == "trash") app.ShowTrash();
                     else if (open == "settings") app.ShowSettings();
+                    else if (open == "reminder" && app.Notes.Count > 0) app.Notes[0].TestEditReminder(0); // 调界面用
+                    if (testPhase != null)
+                        wpf.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle,
+                            new Action(delegate { SelfTest.Run(app, testPhase, testOut, syncServer, syncKey); }));
                 };
 
                 var listener = new Thread(delegate()

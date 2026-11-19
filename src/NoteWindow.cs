@@ -13,7 +13,7 @@ using System.Windows.Threading;
 
 namespace DeskNote
 {
-    class NoteWindow : Window
+    partial class NoteWindow : Window
     {
         readonly DeskApp app;
         public readonly NoteData Data;
@@ -24,6 +24,7 @@ namespace DeskNote
         const int NotEditing = -1, TitleIndex = -2;
         int editIndex = NotEditing;   // 正在编辑：标题 / 条目下标（等于条目数表示新增）
         TextBox editBox;
+        string editOrigText;          // 开始编辑时这一条的原文，合并外部修改时用来找回位置
         int menuTarget = NotEditing;  // 右键点中的条目
         int dragIndex = -1;           // 正在拖动排序的条目
         bool dragChanged;
@@ -64,6 +65,7 @@ namespace DeskNote
             if (Collapsed) EnterCollapsed(); else Render();
 
             SourceInitialized += OnSourceInitialized;
+            PreviewKeyDown += OnPreviewKey;
             Deactivated += delegate { CommitEdit(true); SendToBottom(); };
             Closing += delegate(object s, System.ComponentModel.CancelEventArgs e)
             {
@@ -191,10 +193,12 @@ namespace DeskNote
         {
             var tb = new TextBlock
             {
-                Text = it.Text, FontFamily = UiFont, FontSize = d.FontSize,
+                FontFamily = UiFont, FontSize = d.FontSize,
                 FontWeight = FontWeight.FromOpenTypeWeight(d.FontWeight),
                 Foreground = TextBrush, TextWrapping = TextWrapping.Wrap, LineHeight = LineH
             };
+            AddTextWithLinks(tb, it.Text);
+            if (it.Remind.HasValue) tb.Inlines.Add(ReminderTag(it));
             if (d.Checkboxes && it.Done)
             {
                 tb.Opacity = 0.5;
@@ -268,7 +272,7 @@ namespace DeskNote
                 {
                     e.Handled = true;
                     CommitEdit(true);
-                    if (index < d.Items.Count) { d.Items[index].Done = !d.Items[index].Done; Save(); Render(); }
+                    if (index < d.Items.Count) { BeginChange(); d.Items[index].Done = !d.Items[index].Done; EndChange(); Save(); Render(); }
                 };
             return hit;
         }
@@ -353,295 +357,38 @@ namespace DeskNote
         }
 
         // 已删除的便签不再写文件（否则关窗时保存位置会把刚删掉的文件又写回来）
-        void Save() { if (!Deleted) Store.SaveNote(d); }
+        void Save()
+        {
+            if (Deleted) return;
+            Store.SaveNote(d);
+            app.OnNoteSaved();
+        }
 
         // 外部改了这张便签的文件：重新读入
-        public void ReloadFrom(NoteData fresh)
+        // 正在编辑、拖动或菜单开着时先存着，结束后再合并（见 CommitEdit / EndReorder / EndChange）
+        NoteData pendingReload;
+
+        // 外部改了这张便签（文件被改、或同步拉下来的新内容）。keepWindow：只换内容，不动窗口模式和折叠状态
+        public void ReloadFrom(NoteData fresh, bool keepWindow)
         {
-            if (Editing || dragIndex >= 0) return; // 正在编辑或拖动时不打断
+            if (keepWindow) { fresh.Mode = d.Mode; fresh.Collapsed = d.Collapsed; }
+            if (Editing || dragIndex >= 0 || changeDepth > 0) { pendingReload = fresh; return; }
+            ApplyExternal(fresh);
+            Render();
+        }
+
+        public void ReloadFrom(NoteData fresh) { ReloadFrom(fresh, false); }
+
+        void ApplyExternal(NoteData fresh)
+        {
             bool wasCollapsed = d.Collapsed;
-            d.Title = fresh.Title; d.Items = fresh.Items;
-            d.Opacity = fresh.Opacity; d.FontSize = fresh.FontSize; d.FontWeight = fresh.FontWeight;
-            d.TextColor = fresh.TextColor; d.BgColor = fresh.BgColor; d.Shadow = fresh.Shadow; d.Checkboxes = fresh.Checkboxes;
+            d.CopyContentFrom(fresh);
+            ClearUndo(); // 外部改过以后，旧的撤销记录对不上了
             ApplyOpacity();
             ApplyShadow();
             if (fresh.Mode != d.Mode) SetMode(fresh.Mode);
             if (fresh.Collapsed != wasCollapsed) { if (fresh.Collapsed) Collapse(); else Expand(); }
-            Render();
-        }
-
-        // =====================================================================
-        // 胶囊：折叠、吸边、贴边后自动缩进、悬停预览
-        // =====================================================================
-        void Collapse()
-        {
-            if (Collapsed) return;
-            CommitEdit(true);
-            d.Width = Width; d.Height = Height;
-            // 便签本来贴着屏幕右/下边的话，折叠后胶囊也贴在那一边
-            Rect wa = WorkAreaDip();
-            bool keepRight = Math.Abs(wa.Right - (Left + ActualWidth)) < SnapDist;
-            bool keepBottom = Math.Abs(wa.Bottom - (Top + ActualHeight)) < SnapDist;
-            EnterCollapsed();
-            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(delegate
-            {
-                if (keepRight) Left = wa.Right - ActualWidth;
-                if (keepBottom) Top = wa.Bottom - ActualHeight;
-                SnapCapsule();
-                SaveLayout();
-                ScheduleCapsuleHide();
-            }));
-        }
-
-        void EnterCollapsed()
-        {
-            d.Collapsed = true;
-            collapseBtn = null;
-            MinWidth = 0; MinHeight = 0;
-            card.Child = capsule;
-            card.CornerRadius = new CornerRadius(14);
-            card.Padding = new Thickness(14, 5, 14, 6);
-            card.ToolTip = null;
-            ApplyOpacity();
-            RenderCapsule();
-            SizeToContent = SizeToContent.WidthAndHeight;
-            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(delegate { SnapCapsule(); ScheduleCapsuleHide(); }));
-        }
-
-        int UndoneCount()
-        {
-            int c = 0;
-            foreach (var it in d.Items) if (!d.Checkboxes || !it.Done) c++;
-            return c;
-        }
-
-        void RenderCapsule()
-        {
-            capsule.Children.Clear();
-            double size = Math.Min(d.FontSize, 15);
-            capsule.Children.Add(new TextBlock
-            {
-                Text = d.Title, FontFamily = UiFont, FontSize = size, FontWeight = FontWeights.Bold,
-                Foreground = TextBrush, MaxWidth = 220, TextTrimming = TextTrimming.CharacterEllipsis
-            });
-            capsule.Children.Add(new TextBlock
-            {
-                Text = "  " + UndoneCount(), FontFamily = UiFont, FontSize = size, Foreground = DimBrush
-            });
-            if (preview != null && preview.IsOpen) FillPreview();
-        }
-
-        void Expand()
-        {
-            if (!Collapsed) return;
-            hideTimer.Stop();
-            ClosePreview();
-            if (capHidden) { Left = dockedLeft; Top = dockedTop; capHidden = false; }
-            // 贴在右/下边的胶囊，展开时朝屏幕里面展开
-            Rect wa = WorkAreaDip();
-            double capRight = Left + ActualWidth, capBottom = Top + ActualHeight;
-            bool wasR = dockR, wasB = dockB;
-            d.Collapsed = false;
-            SizeToContent = SizeToContent.Manual;
-            MinWidth = 160; MinHeight = 120;
-            Width = d.Width; Height = d.Height;
-            card.Child = scroll;
-            card.CornerRadius = new CornerRadius(4);
-            card.Padding = new Thickness(20, 16, 20, 16);
-            ApplyOpacity();
-            if (wasR) Left = capRight - Width;
-            if (wasB) Top = capBottom - Height;
-            // 不跑出当前屏幕
-            if (Left + Width > wa.Right) Left = wa.Right - Width;
-            if (Top + Height > wa.Bottom) Top = wa.Bottom - Height;
-            if (Left < wa.Left) Left = wa.Left;
-            if (Top < wa.Top) Top = wa.Top;
-            Render();
-            SaveLayout();
-        }
-
-        // ---- 吸边 ----
-        const double SnapDist = 24;
-        bool dockL, dockR, dockT, dockB;
-
-        double DpiScale()
-        {
-            var src = PresentationSource.FromVisual(this);
-            return src != null && src.CompositionTarget != null ? src.CompositionTarget.TransformToDevice.M11 : 1;
-        }
-
-        // 窗口中心所在显示器的工作区（不含任务栏），换算成 WPF 单位
-        Rect WorkAreaDip()
-        {
-            double s = DpiScale();
-            var center = new System.Drawing.Point((int)((Left + ActualWidth / 2) * s), (int)((Top + ActualHeight / 2) * s));
-            var wa = System.Windows.Forms.Screen.FromPoint(center).WorkingArea;
-            return new Rect(wa.Left / s, wa.Top / s, wa.Width / s, wa.Height / s);
-        }
-
-        // 胶囊离屏幕边缘不到 SnapDist 就贴上去；跑出屏幕的部分拉回来；贴着的一侧改成直角
-        void SnapCapsule()
-        {
-            if (!Collapsed || capHidden) return;
-            Rect wa = WorkAreaDip();
-            double w = ActualWidth, h = ActualHeight;
-            if (Left - wa.Left < SnapDist) Left = wa.Left;
-            else if (wa.Right - (Left + w) < SnapDist) Left = wa.Right - w;
-            if (Top - wa.Top < SnapDist) Top = wa.Top;
-            else if (wa.Bottom - (Top + h) < SnapDist) Top = wa.Bottom - h;
-
-            dockL = Math.Abs(Left - wa.Left) < 0.5;
-            dockR = Math.Abs(Left + w - wa.Right) < 0.5;
-            dockT = Math.Abs(Top - wa.Top) < 0.5;
-            dockB = Math.Abs(Top + h - wa.Bottom) < 0.5;
-            const double r = 14;
-            card.CornerRadius = new CornerRadius(
-                dockL || dockT ? 0 : r, dockR || dockT ? 0 : r,
-                dockR || dockB ? 0 : r, dockL || dockB ? 0 : r);
-        }
-
-        // ---- 贴边后自动缩进，只露出一条边；鼠标移上去滑出来 ----
-        const double PeekStrip = 5;
-        readonly DispatcherTimer hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
-        bool capHidden, sliding;
-        double dockedLeft, dockedTop;
-        DispatcherTimer slideTimer;
-
-        void ScheduleCapsuleHide()
-        {
-            if (!Collapsed) return;
-            hideTimer.Stop();
-            hideTimer.Start();
-        }
-
-        void OnHideTimer(object s, EventArgs e)
-        {
-            hideTimer.Stop();
-            if (!Collapsed || card.IsMouseOver || (preview != null && previewCard.IsMouseOver) || peeking) return;
-            ClosePreview();
-            if (capHidden || !(dockL || dockR || dockT || dockB)) return;
-            Rect wa = WorkAreaDip();
-            double w = ActualWidth, h = ActualHeight, x = Left, y = Top;
-            // 优先左右缩进；缩进方向那边要是挨着另一块屏幕就不缩，免得跑到那块屏上
-            if (dockL && !OtherScreenAt(wa.Left - 2, Top + h / 2)) x = wa.Left - w + PeekStrip;
-            else if (dockR && !OtherScreenAt(wa.Right + 2, Top + h / 2)) x = wa.Right - PeekStrip;
-            else if (dockT && !OtherScreenAt(Left + w / 2, wa.Top - 2)) y = wa.Top - h + PeekStrip;
-            else if (dockB && !OtherScreenAt(Left + w / 2, wa.Bottom + 2)) y = wa.Bottom - PeekStrip;
-            else return;
-            dockedLeft = Left; dockedTop = Top;
-            capHidden = true;
-            SlideTo(x, y);
-        }
-
-        bool OtherScreenAt(double xDip, double yDip)
-        {
-            double s = DpiScale();
-            var p = new System.Drawing.Point((int)(xDip * s), (int)(yDip * s));
-            foreach (var sc in System.Windows.Forms.Screen.AllScreens)
-                if (sc.Bounds.Contains(p)) return true;
-            return false;
-        }
-
-        void OnCapsuleEnter()
-        {
-            hideTimer.Stop();
-            if (dragIndex >= 0) return;
-            if (capHidden)
-            {
-                capHidden = false;
-                SlideTo(dockedLeft, dockedTop);
-            }
-            ShowPreview();
-        }
-
-        // 缓动移动窗口（约 150ms）
-        void SlideTo(double x, double y)
-        {
-            if (slideTimer != null) slideTimer.Stop();
-            double x0 = Left, y0 = Top;
-            var start = DateTime.Now;
-            const double dur = 150;
-            sliding = true;
-            slideTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(8) };
-            slideTimer.Tick += delegate
-            {
-                double t = Math.Min(1, (DateTime.Now - start).TotalMilliseconds / dur);
-                double k = 1 - Math.Pow(1 - t, 3); // ease-out
-                Left = x0 + (x - x0) * k;
-                Top = y0 + (y - y0) * k;
-                if (t >= 1) { slideTimer.Stop(); sliding = false; }
-            };
-            slideTimer.Start();
-        }
-
-        // ---- 悬停预览卡片 ----
-        Popup preview;
-        Border previewCard;
-        StackPanel previewList;
-
-        void ShowPreview()
-        {
-            if (!Collapsed || dragIndex >= 0) return;
-            if (preview == null)
-            {
-                previewList = new StackPanel();
-                previewCard = new Border
-                {
-                    CornerRadius = new CornerRadius(6), Padding = new Thickness(16, 12, 16, 10),
-                    MaxWidth = 340, MaxHeight = 460, Child = new ScrollViewer
-                    {
-                        Content = previewList, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Focusable = false
-                    },
-                    Cursor = Cursors.Hand, ToolTip = "单击展开"
-                };
-                previewCard.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Expand(); };
-                previewCard.MouseEnter += delegate { hideTimer.Stop(); };
-                previewCard.MouseLeave += delegate { ScheduleCapsuleHide(); };
-                preview = new Popup
-                {
-                    Child = previewCard, AllowsTransparency = true, StaysOpen = true,
-                    PlacementTarget = card, PopupAnimation = PopupAnimation.Fade
-                };
-            }
-            // 往屏幕里面的方向弹出
-            preview.Placement = dockR ? PlacementMode.Left : dockL ? PlacementMode.Right : dockB ? PlacementMode.Top : PlacementMode.Bottom;
-            preview.HorizontalOffset = preview.Placement == PlacementMode.Left ? -6 : preview.Placement == PlacementMode.Right ? 6 : 0;
-            preview.VerticalOffset = preview.Placement == PlacementMode.Top ? -6 : preview.Placement == PlacementMode.Bottom ? 6 : 0;
-            FillPreview();
-            preview.IsOpen = true;
-        }
-
-        void FillPreview()
-        {
-            previewCard.Background = new SolidColorBrush(BgWithAlpha(Math.Max(d.Opacity, 0.92)));
-            previewList.Children.Clear();
-            previewList.Children.Add(new TextBlock
-            {
-                Text = d.Title, FontFamily = UiFont, FontSize = Math.Min(TitleSize, 18), FontWeight = FontWeights.Bold,
-                Foreground = TextBrush, Margin = new Thickness(0, 0, 0, 8), TextTrimming = TextTrimming.CharacterEllipsis
-            });
-            if (d.Items.Count == 0)
-                previewList.Children.Add(new TextBlock { Text = "（空）", FontFamily = UiFont, FontSize = d.FontSize, Foreground = DimBrush });
-            foreach (var it in d.Items)
-            {
-                var row = new Grid { Margin = new Thickness(0, 0, 0, Math.Round(d.FontSize * 0.35)) };
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                row.ColumnDefinitions.Add(new ColumnDefinition());
-                row.Children.Add(new TextBlock
-                {
-                    Text = d.Checkboxes && it.Done ? "✓" : "•", FontFamily = UiFont, FontSize = d.FontSize, Foreground = DimBrush,
-                    Margin = new Thickness(0, 0, 8, 0), LineHeight = LineH
-                });
-                var tb = MakeItemText(it);
-                Grid.SetColumn(tb, 1);
-                row.Children.Add(tb);
-                previewList.Children.Add(row);
-            }
-        }
-
-        void ClosePreview()
-        {
-            if (preview != null) preview.IsOpen = false;
+            Save();
         }
 
         // =====================================================================
@@ -686,10 +433,25 @@ namespace DeskNote
             });
             var add = Item("新增一条", delegate { Expand(); BeginEdit(d.Items.Count); });
             var clearDone = Item("清除已完成的条目", ClearDone);
+            var remind = Item("设置提醒…", delegate { int t = menuTarget; Dispatcher.BeginInvoke(new Action(delegate { EditReminder(t); })); });
+            var unremind = Item("取消提醒", delegate
+            {
+                if (menuTarget >= 0 && menuTarget < d.Items.Count) { d.Items[menuTarget].Remind = null; d.Items[menuTarget].Reminded = false; Render(); }
+            });
+            var undoMi = Item("撤销", Undo);
+            var redoMi = Item("重做", Redo);
+            undoMi.InputGestureText = "Ctrl+Z";
+            redoMi.InputGestureText = "Ctrl+Y";
+            menu.Items.Add(undoMi);
+            menu.Items.Add(redoMi);
+            var undoSep = new Separator();
+            menu.Items.Add(undoSep);
             menu.Items.Add(up);
             menu.Items.Add(down);
             menu.Items.Add(del);
             menu.Items.Add(add);
+            menu.Items.Add(remind);
+            menu.Items.Add(unremind);
             menu.Items.Add(clearDone);
             menu.Items.Add(new Separator());
 
@@ -781,6 +543,13 @@ namespace DeskNote
                 CommitEdit(true);
                 ClosePreview();
                 bool onItem = !Collapsed && menuTarget >= 0 && menuTarget < d.Items.Count;
+                undoMi.Visibility = undoStack.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+                redoMi.Visibility = redoStack.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+                undoSep.Visibility = undoStack.Count + redoStack.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+                BeginChange(); // 菜单里做的所有改动算一步撤销（在 Closed 里结束）
+                remind.Visibility = onItem ? Visibility.Visible : Visibility.Collapsed;
+                remind.Header = onItem && d.Items[menuTarget].Remind.HasValue ? "修改提醒…" : "设置提醒…";
+                unremind.Visibility = onItem && d.Items[menuTarget].Remind.HasValue ? Visibility.Visible : Visibility.Collapsed;
                 del.Visibility = onItem ? Visibility.Visible : Visibility.Collapsed;
                 up.Visibility = onItem && menuTarget > 0 ? Visibility.Visible : Visibility.Collapsed;
                 down.Visibility = onItem && menuTarget < d.Items.Count - 1 ? Visibility.Visible : Visibility.Collapsed;
@@ -792,7 +561,7 @@ namespace DeskNote
                 shadow.IsChecked = d.Shadow;
                 foreach (var r in menuRefresh) r();
             };
-            menu.Closed += delegate { Save(); if (Collapsed) ScheduleCapsuleHide(); };
+            menu.Closed += delegate { EndChange(); Save(); if (Collapsed) ScheduleCapsuleHide(); };
             card.ContextMenu = menu;
         }
 
@@ -818,6 +587,7 @@ namespace DeskNote
             menu.Items.Add(Item("自定义…", delegate
             {
                 Color cur = get();
+                BeginChange();
                 using (var dlg = new System.Windows.Forms.ColorDialog())
                 {
                     dlg.FullOpen = true;
@@ -828,6 +598,7 @@ namespace DeskNote
                         Save();
                     }
                 }
+                EndChange();
                 SendToBottom();
             }));
             menu.SubmenuOpened += delegate
@@ -859,7 +630,8 @@ namespace DeskNote
 
         void TrashItemAt(int i)
         {
-            app.TrashItem(d, i, d.Items[i]);
+            var e = app.TrashItem(d, i, d.Items[i]);
+            if (pendingStep != null) pendingStep.Trashed.Add(e);
             d.Items.RemoveAt(i);
         }
 
@@ -875,6 +647,7 @@ namespace DeskNote
         public void RestoreItem(NoteItem it, int index)
         {
             CommitEdit(true);
+            ClearUndo(); // 恢复后再撤销以前的操作会把恢复的条目弄丢，干脆清掉
             d.Items.Insert(Math.Max(0, Math.Min(index, d.Items.Count)), it);
             Save();
             Render();
@@ -893,6 +666,7 @@ namespace DeskNote
         void BeginReorder(int index)
         {
             CommitEdit(true);
+            BeginChange();
             dragIndex = index;
             dragChanged = false;
             Render();
@@ -935,6 +709,7 @@ namespace DeskNote
             dragIndex = -1;
             if (view.IsMouseCaptured) view.ReleaseMouseCapture();
             if (dragChanged) Save();
+            EndChange(); // 拖动期间别处改了这张便签的话，这里会以外部内容为准
             Render();
             SendToBottom();
         }
@@ -944,6 +719,7 @@ namespace DeskNote
             CommitEdit(true);
             if (Collapsed) Expand();
             editIndex = index;
+            editOrigText = index == TitleIndex ? d.Title : index >= 0 && index < d.Items.Count ? d.Items[index].Text : null;
             Activate();
             Render();
         }
@@ -963,8 +739,20 @@ namespace DeskNote
             }
             editIndex = NotEditing;
             editBox = null;
+            if (pendingReload != null && changeDepth == 0)
+            {
+                // 编辑期间别处改了这张便签：先换成外部内容，再把这次编辑合进去
+                var pr = pendingReload; pendingReload = null;
+                ApplyExternal(pr);
+                if (idx >= 0 && (idx >= d.Items.Count || d.Items[idx].Text != editOrigText) && editOrigText != null)
+                {
+                    idx = d.Items.FindIndex(x => x.Text == editOrigText);
+                    if (idx < 0) idx = d.Items.Count; // 原条目在别处被改或删了：这次编辑作为新条目加上，不丢
+                }
+            }
             if (save)
             {
+                BeginChange();
                 if (idx == TitleIndex) d.Title = text.Length > 0 ? text : "ToDo";
                 else if (idx < d.Items.Count)
                 {
@@ -973,9 +761,11 @@ namespace DeskNote
                 }
                 else if (text.Trim().Length > 0) d.Items.Add(new NoteItem { Text = text });
                 Save();
+                EndChange();
             }
             Render();
             SendToBottom();
+            if (IsActive) Focus(); // 让 Ctrl+Z 能被这张便签收到
         }
 
         // =====================================================================
@@ -1031,6 +821,8 @@ namespace DeskNote
             }
             // 正在编辑时点到别处：先保存这一条
             if (Editing) { CommitEdit(true); e.Handled = true; return; }
+            Focus();
+            if (TryOpenLink(e)) { e.Handled = true; return; }
             if (e.ClickCount == 2)
             {
                 int tag = TagOf(e.OriginalSource as DependencyObject);
@@ -1043,186 +835,5 @@ namespace DeskNote
             SendToBottom();
         }
 
-        // =====================================================================
-        // 位置：用物理像素保存和恢复，多块屏幕缩放不同时也准
-        // =====================================================================
-        void RestorePosition()
-        {
-            if (d.X.HasValue && d.Y.HasValue)
-            {
-                int x = (int)d.X.Value, y = (int)d.Y.Value;
-                // 位置得落在某块屏幕上（显示器可能已经断开）
-                var probe = new System.Drawing.Rectangle(x, y, 40, 20);
-                foreach (var sc in System.Windows.Forms.Screen.AllScreens)
-                    if (sc.WorkingArea.IntersectsWith(probe))
-                    {
-                        Native.SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0, Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
-                        return;
-                    }
-            }
-            PlaceDefault();
-        }
-
-        void PlaceDefault()
-        {
-            var wa = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;
-            int offset = (int)(app.NoteIndex(this) * 30 * DpiScale());
-            Native.SetWindowPos(hwnd, IntPtr.Zero, wa.Left + (int)(80 * DpiScale()) + offset, wa.Top + (int)(80 * DpiScale()) + offset, 0, 0,
-                Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
-        }
-
-        // 把跑到屏幕外的便签拉回主屏
-        public void BringOnScreen()
-        {
-            if (hwnd == IntPtr.Zero) return;
-            if (capHidden) { Left = dockedLeft; Top = dockedTop; capHidden = false; }
-            Native.RECT r;
-            Native.GetWindowRect(hwnd, out r);
-            var rect = new System.Drawing.Rectangle(r.Left, r.Top, Math.Max(1, r.Right - r.Left), Math.Max(1, r.Bottom - r.Top));
-            bool visible = false;
-            foreach (var sc in System.Windows.Forms.Screen.AllScreens)
-            {
-                var inter = System.Drawing.Rectangle.Intersect(sc.WorkingArea, rect);
-                if (inter.Width >= Math.Min(rect.Width, 60) && inter.Height >= Math.Min(rect.Height, 20)) visible = true;
-            }
-            if (!visible) { PlaceDefault(); if (Collapsed) SnapCapsule(); }
-            SaveLayout();
-        }
-
-        public void SaveLayout()
-        {
-            if (hwnd == IntPtr.Zero) return;
-            if (!Collapsed && SizeToContent == SizeToContent.Manual) { d.Width = Width; d.Height = Height; }
-            if (capHidden)
-            {
-                double s = DpiScale();
-                d.X = dockedLeft * s; d.Y = dockedTop * s;
-            }
-            else
-            {
-                Native.RECT r;
-                if (Native.GetWindowRect(hwnd, out r)) { d.X = r.Left; d.Y = r.Top; }
-            }
-            Save();
-        }
-
-        // =====================================================================
-        // 窗口模式：置底在桌面 / 置顶 / 普通窗口；快捷键临时提到最前
-        // =====================================================================
-        void OnSourceInitialized(object s, EventArgs e)
-        {
-            hwnd = new WindowInteropHelper(this).Handle;
-            HwndSource.FromHwnd(hwnd).AddHook(WndProc);
-            // 资源管理器重启后会广播这条消息，借此重新挂到新的桌面窗口上
-            taskbarCreatedMsg = Native.RegisterWindowMessage("TaskbarCreated");
-            RestorePosition();
-            ApplyMode();
-        }
-
-        void SetMode(WinMode m)
-        {
-            if (m == d.Mode) return;
-            d.Mode = m;
-            // 任务栏按钮要在窗口重新显示时才会增减
-            Hide();
-            ApplyMode();
-            Show();
-        }
-
-        void ApplyMode()
-        {
-            if (hwnd == IntPtr.Zero) return;
-            long ex = Native.GetWindowLongPtr(hwnd, Native.GWL_EXSTYLE).ToInt64();
-            if (d.Mode == WinMode.Normal) ex = (ex & ~Native.WS_EX_TOOLWINDOW) | Native.WS_EX_APPWINDOW;   // 进任务栏和 Alt+Tab
-            else ex = (ex | Native.WS_EX_TOOLWINDOW) & ~Native.WS_EX_APPWINDOW;                           // 不进任务栏和 Alt+Tab
-            Native.SetWindowLongPtr(hwnd, Native.GWL_EXSTYLE, new IntPtr(ex));
-
-            if (d.Mode == WinMode.Desktop)
-            {
-                Topmost = peeking;
-                AttachToDesktop();
-            }
-            else
-            {
-                Native.SetWindowLongPtr(hwnd, Native.GWLP_HWNDPARENT, IntPtr.Zero);
-                Topmost = d.Mode == WinMode.Topmost || peeking;
-            }
-            Native.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
-                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_FRAMECHANGED);
-        }
-
-        // 置底模式：让桌面(Progman)成为所有者，按 Win+D 显示桌面时不会被一起藏起来。
-        // 开机自启时桌面可能还没建好，找不到就每 2 秒重试，最多 1 分钟
-        void AttachToDesktop()
-        {
-            IntPtr progman = Native.FindWindow("Progman", null);
-            if (progman != IntPtr.Zero)
-            {
-                Native.SetWindowLongPtr(hwnd, Native.GWLP_HWNDPARENT, progman);
-                SendToBottom();
-                return;
-            }
-            int tries = 0;
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            timer.Tick += delegate
-            {
-                IntPtr p = Native.FindWindow("Progman", null);
-                if (d.Mode != WinMode.Desktop || p != IntPtr.Zero || ++tries >= 30)
-                {
-                    timer.Stop();
-                    if (d.Mode == WinMode.Desktop && p != IntPtr.Zero) { Native.SetWindowLongPtr(hwnd, Native.GWLP_HWNDPARENT, p); SendToBottom(); }
-                }
-            };
-            timer.Start();
-        }
-
-        public void BeginPeek()
-        {
-            peeking = true;
-            hideTimer.Stop();
-            if (capHidden) { if (slideTimer != null) slideTimer.Stop(); sliding = false; Left = dockedLeft; Top = dockedTop; capHidden = false; }
-            // 挂在桌面窗口下的便签设不了置顶，先摘下来，结束时再挂回去
-            if (hwnd != IntPtr.Zero) Native.SetWindowLongPtr(hwnd, Native.GWLP_HWNDPARENT, IntPtr.Zero);
-            Topmost = false;
-            Topmost = true;
-        }
-
-        public void EndPeek()
-        {
-            if (!peeking) return;
-            peeking = false;
-            CommitEdit(true);
-            ApplyMode();
-            if (Collapsed) ScheduleCapsuleHide();
-        }
-
-        IntPtr WndProc(IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled)
-        {
-            if (taskbarCreatedMsg != 0 && msg == taskbarCreatedMsg)
-            {
-                if (d.Mode == WinMode.Desktop) AttachToDesktop();
-            }
-            else if (msg == Native.WM_WINDOWPOSCHANGING && d.Mode == WinMode.Desktop && !Editing && !peeking)
-            {
-                // 置底模式下（非编辑时）始终压在其他窗口下面
-                var pos = (Native.WINDOWPOS)Marshal.PtrToStructure(l, typeof(Native.WINDOWPOS));
-                if ((pos.flags & Native.SWP_NOZORDER) == 0)
-                {
-                    pos.hwndInsertAfter = Native.HWND_BOTTOM;
-                    Marshal.StructureToPtr(pos, l, false);
-                }
-            }
-            else if (msg == Native.WM_EXITSIZEMOVE)
-            {
-                SaveLayout();
-            }
-            return IntPtr.Zero;
-        }
-
-        void SendToBottom()
-        {
-            if (hwnd != IntPtr.Zero && d.Mode == WinMode.Desktop && !Editing && !peeking)
-                Native.SetWindowPos(hwnd, Native.HWND_BOTTOM, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-        }
     }
 }

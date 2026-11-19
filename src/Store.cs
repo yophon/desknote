@@ -153,12 +153,31 @@ namespace DeskNote
     {
         public string Text = "";
         public bool Done;
-        public NoteItem Clone() { return new NoteItem { Text = Text, Done = Done }; }
-        public JObj ToJson() { return new JObj().Set("text", Text).Set("done", Done); }
+        public DateTime? Remind;   // 提醒时间（本地时间，精确到分钟）
+        public bool Reminded;      // 已经提醒过
+        public const string TimeFmt = "yyyy-MM-dd HH:mm";
+
+        public NoteItem Clone() { return new NoteItem { Text = Text, Done = Done, Remind = Remind, Reminded = Reminded }; }
+        public JObj ToJson()
+        {
+            var o = new JObj().Set("text", Text).Set("done", Done);
+            if (Remind.HasValue) o.Set("remind", Remind.Value.ToString(TimeFmt, CultureInfo.InvariantCulture)).Set("reminded", Reminded);
+            return o;
+        }
         public static NoteItem From(object o)
         {
             var d = o as IDictionary<string, object>;
-            if (d != null) return new NoteItem { Text = Json.Str(d, "text", "").Replace("\r\n", "\n"), Done = Json.Bool(d, "done", false) };
+            if (d != null)
+            {
+                var it = new NoteItem { Text = Json.Str(d, "text", "").Replace("\r\n", "\n"), Done = Json.Bool(d, "done", false) };
+                DateTime t;
+                if (DateTime.TryParseExact(Json.Str(d, "remind", ""), TimeFmt, CultureInfo.InvariantCulture, DateTimeStyles.None, out t))
+                {
+                    it.Remind = t;
+                    it.Reminded = Json.Bool(d, "reminded", false);
+                }
+                return it;
+            }
             var s = o as string; // 也接受直接写字符串
             return s != null ? new NoteItem { Text = s.Replace("\r\n", "\n") } : null;
         }
@@ -211,6 +230,24 @@ namespace DeskNote
                 .Set("width", Math.Round(Width, 1)).Set("height", Math.Round(Height, 1));
             return new JObj().Set("title", Title).Set("items", items).Set("style", style).Set("window", win);
         }
+
+        // 只含内容和外观（不含窗口位置），用于撤销和比较是否改动
+        public string ContentJson()
+        {
+            var j = ToJson();
+            j.RemoveAll(kv => kv.Key == "window");
+            return Json.Write(j);
+        }
+
+        // 用另一份数据覆盖内容和外观（窗口位置、模式不动）
+        public void CopyContentFrom(NoteData s)
+        {
+            Title = s.Title; Items = s.Items;
+            Opacity = s.Opacity; FontSize = s.FontSize; FontWeight = s.FontWeight;
+            TextColor = s.TextColor; BgColor = s.BgColor; Shadow = s.Shadow; Checkboxes = s.Checkboxes;
+        }
+
+        public static NoteData FromContentJson(string json, string id) { return From(Json.Parse(json), id); }
 
         public static NoteData From(IDictionary<string, object> d, string id)
         {
@@ -295,6 +332,9 @@ namespace DeskNote
         public string Hotkey = "Ctrl+Alt+N";
         // 首次运行时是否已处理过开机自启（全新安装默认打开；老用户不动）
         public bool AutoStartInit;
+        // 同步到 gopan
+        public bool SyncEnabled;
+        public string SyncServer = "", SyncFolder = "/DeskNote", SyncKey = "";
     }
 
     // ---------------------------------------------------------------------
@@ -305,6 +345,7 @@ namespace DeskNote
         public static string Dir, NotesDir, TrashFile, SettingsFile;
         // 自己最后写入每个便签文件的内容，用来区分外部修改
         static readonly Dictionary<string, string> lastWritten = new Dictionary<string, string>();
+        static readonly HashSet<string> deleted = new HashSet<string>();
 
         public static void Init(string dir)
         {
@@ -358,6 +399,8 @@ namespace DeskNote
         {
             try
             {
+                // 已删除（移进回收站）的便签不再写回，防止关窗时保存位置把文件又写出来
+                if (deleted.Contains(n.Id)) return;
                 string content = Json.Write(n.ToJson());
                 string last;
                 if (lastWritten.TryGetValue(n.Id, out last) && last == content) return;
@@ -373,6 +416,7 @@ namespace DeskNote
 
         public static void DeleteNoteFile(string id)
         {
+            deleted.Add(id);
             try { File.Delete(NotePath(id)); lastWritten.Remove(id); }
             catch (Exception ex) { Log("删除便签文件失败：" + ex.Message); }
         }
@@ -400,6 +444,10 @@ namespace DeskNote
         }
 
         public static bool IsKnown(string id) { return lastWritten.ContainsKey(id); }
+
+        // 从回收站恢复时解除删除标记
+        public static void Revive(string id) { deleted.Remove(id); }
+        public static bool IsDeleted(string id) { return deleted.Contains(id); }
 
         // ---- 回收站 ----
         public static List<TrashEntry> LoadTrash()
@@ -442,6 +490,10 @@ namespace DeskNote
                 s.HotkeyEnabled = Json.Bool(d, "hotkeyEnabled", s.HotkeyEnabled);
                 s.Hotkey = Json.Str(d, "hotkey", s.Hotkey);
                 s.AutoStartInit = Json.Bool(d, "autoStartInit", false);
+                s.SyncEnabled = Json.Bool(d, "syncEnabled", false);
+                s.SyncServer = Json.Str(d, "syncServer", "");
+                s.SyncFolder = Json.Str(d, "syncFolder", s.SyncFolder);
+                s.SyncKey = Unprotect(Json.Str(d, "syncKey", ""));
             }
             catch (Exception ex) { Log("读取设置失败：" + ex.Message); }
             return s;
@@ -449,8 +501,68 @@ namespace DeskNote
 
         public static void SaveSettings(GlobalSettings s)
         {
-            try { WriteAtomic(SettingsFile, Json.Write(new JObj().Set("hotkeyEnabled", s.HotkeyEnabled).Set("hotkey", s.Hotkey).Set("autoStartInit", s.AutoStartInit))); }
+            try
+            {
+                WriteAtomic(SettingsFile, Json.Write(new JObj()
+                    .Set("hotkeyEnabled", s.HotkeyEnabled).Set("hotkey", s.Hotkey).Set("autoStartInit", s.AutoStartInit)
+                    .Set("syncEnabled", s.SyncEnabled).Set("syncServer", s.SyncServer).Set("syncFolder", s.SyncFolder)
+                    .Set("syncKey", Protect(s.SyncKey))));
+            }
             catch (Exception ex) { Log("保存设置失败：" + ex.Message); }
+        }
+
+        // 密钥用 Windows 的 DPAPI 加密保存：只有当前 Windows 用户能解开，文件被拷走也读不出来
+        static string Protect(string plain)
+        {
+            if (string.IsNullOrEmpty(plain)) return "";
+            var b = System.Security.Cryptography.ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), null,
+                System.Security.Cryptography.DataProtectionScope.CurrentUser);
+            return "dpapi:" + Convert.ToBase64String(b);
+        }
+
+        static string Unprotect(string s)
+        {
+            if (string.IsNullOrEmpty(s) || !s.StartsWith("dpapi:")) return "";
+            try
+            {
+                var b = System.Security.Cryptography.ProtectedData.Unprotect(Convert.FromBase64String(s.Substring(6)), null,
+                    System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(b);
+            }
+            catch (Exception ex) { Log("解不开保存的同步密钥（换了电脑或用户？）：" + ex.Message); return ""; }
+        }
+
+        // ---- 每日备份：backups\yyyy-MM-dd\ 里放一份当天第一次检查时的全部数据，保留最近 KeepBackups 天 ----
+        public const int KeepBackups = 14;
+        public static string BackupsDir { get { return Path.Combine(Dir, "backups"); } }
+
+        // 今天已经备份过就什么也不做；返回新建的备份目录或 null
+        public static string DailyBackup()
+        {
+            try
+            {
+                string target = Path.Combine(BackupsDir, DateTime.Now.ToString("yyyy-MM-dd"));
+                if (Directory.Exists(target)) return null;
+                string tmp = target + ".partial";
+                if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
+                Directory.CreateDirectory(Path.Combine(tmp, "notes"));
+                foreach (var f in Directory.GetFiles(NotesDir, "*.json"))
+                    File.Copy(f, Path.Combine(tmp, "notes", Path.GetFileName(f)));
+                if (File.Exists(TrashFile)) File.Copy(TrashFile, Path.Combine(tmp, "trash.json"));
+                if (File.Exists(SettingsFile)) File.Copy(SettingsFile, Path.Combine(tmp, "settings.json"));
+                Directory.Move(tmp, target); // 复制完整了才改成正式名字
+
+                var dirs = new List<string>();
+                foreach (var dd in Directory.GetDirectories(BackupsDir))
+                {
+                    DateTime t;
+                    if (DateTime.TryParseExact(Path.GetFileName(dd), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out t)) dirs.Add(dd);
+                }
+                dirs.Sort(StringComparer.Ordinal);
+                for (int i = 0; i < dirs.Count - KeepBackups; i++) Directory.Delete(dirs[i], true);
+                return target;
+            }
+            catch (Exception ex) { Log("每日备份失败：" + ex.Message); return null; }
         }
 
         // ---- 从上一版（单张便签：note.json + settings.txt）迁移 ----
