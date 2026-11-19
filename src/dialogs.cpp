@@ -433,7 +433,7 @@ void TrashWindowRefresh(HWND w)
 // =====================================================================
 // 设置：仿 Win11 设置页（分组标题 + 卡片 + 开关），整页自绘，只有三个输入框用系统控件
 // =====================================================================
-enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave };
+enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave, SOpenGopan, SLinkRepo, SLinkGopanRepo, SLinkGopanWeb };
 struct HitArea { int id; D2D1_RECT_F r; };
 
 static void ApplyFrameTheme(HWND h)
@@ -504,7 +504,7 @@ struct SettingsWin
             Ui::AllowDarkControls(edits[i]);
         }
         MakeFont();
-        SendMessageW(edits[0], EM_SETCUEBANNER, TRUE, (LPARAM)L"https://");
+        SendMessageW(edits[0], EM_SETCUEBANNER, TRUE, (LPARAM)DefaultSyncServer);
         SendMessageW(edits[2], EM_SETCUEBANNER, TRUE, (LPARAM)L"DeskNote");
         KeyCue();
         const wchar_t* e = g_app->ApplyHotkey();
@@ -556,6 +556,25 @@ struct SettingsWin
             if (!T.dark) Ui::Line(rt, r.left + 4, r.bottom - 0.5f, r.right - 4, r.bottom - 0.5f, T.ctrlBorderBottom, 1);
             Ui::Text(rt, t, r, 14, 400, down ? T.text2 : T.text, Ui::Center);
         }
+        return w;
+    }
+
+    // 文字链接（强调色，后面跟一个“新窗口打开”的小图标，悬停加下划线）；x 是左边，返回宽度
+    float Link(ID2D1RenderTarget* rt, int id, const wchar_t* text, float x, float cy)
+    {
+        Str t(text);
+        float tw = Ui::Measure(t, 14, 400);
+        float w = tw + 6 + 12;
+        D2D1_RECT_F r = D2D1::RectF(x - 4, cy - 14, x + w + 4, cy + 14);
+        HitArea a = { id, r };
+        hits.Push(a);
+        if (!rt) return w;
+        const Ui::Theme& T = Ui::T;
+        bool hot = hover == id, down = press == id;
+        u32 c = down ? (T.accent & 0x00FFFFFF) | 0xA0000000 : hot ? (T.accent & 0x00FFFFFF) | 0xD0000000 : T.accent;
+        Ui::Text(rt, t, D2D1::RectF(x, cy - 12, x + tw + 2, cy + 12), 14, 400, c);
+        Ui::Icon(rt, 0xE8A7, x + tw + 6 + 6, cy, 12, c);
+        if (hot) Ui::Line(rt, x, cy + 9.5f, x + tw, cy + 9.5f, c, 1);
         return w;
     }
 
@@ -728,16 +747,38 @@ struct SettingsWin
         if (rt) Ui::TextWrap(rt, help, textL, y, R - 16 - textL, 12, 400, T.text2);
         y += helpH + 14;
         Button(rt, SSyncSave, L"保存并立即同步", R - 16, y + 16, true);
+        Link(rt, SOpenGopan, L"打开 gopan 网页建密钥", textL, y + 16);
         y += 32 + 18;
 
-        y += 20;
-        Str ver(L"DeskNote " APP_VERSION L" · 原生版 · 编译于 ");
+        // ---- 关于：版本 + 项目链接 ----
+        Section(rt, y, L"关于", false);
+        Str ver(L"原生版 · 编译于 ");
         const char* date = __DATE__ " " __TIME__;
         int dn = 0;
         while (date[dn]) dn++;
         ver += FromUtf8(date, dn);
-        if (rt) Ui::Text(rt, ver, D2D1::RectF(L, y, R, y + 17), 12, 400, T.text3);
-        y += 17 + 24;
+        float linksH = 8 + 3 * 36 + 8;
+        Card(rt, y, 0xE946, Str(L"DeskNote " APP_VERSION), ver, T.text2, 0, false, linksH);
+        if (rt)
+        {
+            Ui::FillCorners(rt, D2D1::RectF(L + 1, y, R - 1, y + linksH - 1), 0, 0, 3, 3, T.cardBg2);
+            Ui::Line(rt, L + 1, y + 0.5f, R - 1, y + 0.5f, T.cardBorder, 1);
+        }
+        y += 8;
+        struct { int id; const wchar_t* label; const wchar_t* url; } links[3] = {
+            { SLinkRepo, L"DeskNote 源码", URL_DESKNOTE_REPO },
+            { SLinkGopanRepo, L"gopan 源码", URL_GOPAN_REPO },
+            { SLinkGopanWeb, L"gopan 网页", URL_GOPAN_WEB } };
+        for (int i = 0; i < 3; i++)
+        {
+            float cy = y + 18;
+            if (rt) Ui::Text(rt, Str(links[i].label), D2D1::RectF(textL, cy - 12, textL + 120, cy + 12), 14, 400, T.text);
+            // 网址本身做成链接，靠右
+            float w = Ui::Measure(Str(links[i].url), 14, 400) + 6 + 12;
+            Link(rt, links[i].id, links[i].url, R - 16 - w, cy);
+            y += 36;
+        }
+        y += 8 + 24;
         contentH = y;
     }
 
@@ -822,6 +863,7 @@ struct SettingsWin
         Str sv = GetText(edits[0]).Trim();
         while (sv.EndsWith(L"/")) sv.Truncate(sv.n - 1);
         if (sv.n && !sv.StartsWith(L"http")) sv = L"https://" + sv;
+        if (!sv.n) sv = DefaultSyncServer;
         s.syncServer = sv;
         SetWindowTextW(edits[0], sv.c());
         s.syncFolder = SyncNormFolder(GetText(edits[2]));
@@ -909,6 +951,18 @@ struct SettingsWin
             break;
         case SSyncToggle: s.syncEnabled = !s.syncEnabled; SaveSync(); break;
         case SSyncSave: SaveSync(); break;
+        case SOpenGopan:
+        {
+            // 填了服务器就开那个，否则开默认的 gopan
+            Str sv = GetText(edits[0]).Trim();
+            if (!sv.n) sv = DefaultSyncServer;
+            if (!sv.StartsWith(L"http")) sv = L"https://" + sv;
+            ShellExecuteW(nullptr, L"open", sv.c(), nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
+        case SLinkRepo: ShellExecuteW(nullptr, L"open", URL_DESKNOTE_REPO, nullptr, nullptr, SW_SHOWNORMAL); break;
+        case SLinkGopanRepo: ShellExecuteW(nullptr, L"open", URL_GOPAN_REPO, nullptr, nullptr, SW_SHOWNORMAL); break;
+        case SLinkGopanWeb: ShellExecuteW(nullptr, L"open", URL_GOPAN_WEB, nullptr, nullptr, SW_SHOWNORMAL); break;
         }
         Invalidate();
     }

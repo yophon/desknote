@@ -7,6 +7,11 @@
 
 #define APP_VERSION L"2.0.0"
 
+// 项目和 gopan 的链接（设置页「关于」里打开）；gopan 网页也是同步的默认服务器
+#define URL_DESKNOTE_REPO L"https://github.com/yophon/desknote"
+#define URL_GOPAN_REPO    L"https://github.com/yophon/gopan"
+#define URL_GOPAN_WEB     L"https://drive.979687.xyz"
+
 // 程序内部消息
 #define WM_APP_TRAY        (WM_APP + 1)
 #define WM_APP_SYNCDONE    (WM_APP + 2)

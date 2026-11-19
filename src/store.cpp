@@ -359,7 +359,8 @@ namespace Store
         s.hotkey = d->Str_(L"hotkey", s.hotkey.c());
         s.autoStartInit = d->Bool(L"autoStartInit", false);
         s.syncEnabled = d->Bool(L"syncEnabled", false);
-        s.syncServer = d->Str_(L"syncServer", L"");
+        s.syncServer = d->Str_(L"syncServer", DefaultSyncServer);
+        if (s.syncServer.Trim().Empty()) s.syncServer = DefaultSyncServer; // 留空 = 用默认的 gopan
         s.syncFolder = d->Str_(L"syncFolder", s.syncFolder.c());
         s.syncKey = Unprotect(d->Str_(L"syncKey", L""));
         s.hardwareRender = d->Bool(L"hardwareRender", false);

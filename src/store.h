@@ -56,13 +56,16 @@ struct TrashEntry
     static TrashEntry* From(JVal* v);
 };
 
+// 同步默认连的 gopan（和 app.h 里的 URL_GOPAN_WEB 是同一个地址）
+static const wchar_t* const DefaultSyncServer = L"https://drive.979687.xyz";
+
 struct Settings
 {
     bool hotkeyEnabled = true;
     Str hotkey = L"Ctrl+Alt+N";
     bool autoStartInit = false;
     bool syncEnabled = false;
-    Str syncServer, syncFolder = L"/DeskNote", syncKey;
+    Str syncServer = DefaultSyncServer, syncFolder = L"/DeskNote", syncKey;
     bool hardwareRender = false; // WPF 版的设置，原样保留
 };
 
