@@ -277,11 +277,18 @@ struct App
     void ShowQuickAdd();
     NoteWin* QuickAddTarget();
     bool QuickAdd(const Str& text);
+    // 新版本：启动 1 分钟后、之后每天最多问一次 GitHub；有新版提醒一次（同一个版本只一次），设置页也显示
+    Str updateCheckUrl;
+    Str updateVersion, updateUrl;     // 有新版时
+    bool updateBusy = false;
+    Str noticeUrl;                    // 点通知打开的网址（新版提醒）；空 = 点了打开 balloonNote
+    void CheckUpdate();
+    void OnUpdateResult(bool ok, const Str& tag, const Str& url);
     void CheckFileChanges();
     void Exit();
 
     // 系统外壳（shell.h）交过来的事
-    enum { TimerReminders = 1, TimerGfx = 2, TimerBackup = 3, TimerFiles = 4, TimerSync = 5, TimerRemote = 6 };
+    enum { TimerReminders = 1, TimerGfx = 2, TimerBackup = 3, TimerFiles = 4, TimerSync = 5, TimerRemote = 6, TimerUpdate = 7 };
     void OnTimer(int id);
     void OnTrayClick() { TogglePeek(); }
     void OnTrayMenu(int sx, int sy);

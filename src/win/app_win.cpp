@@ -19,6 +19,7 @@ static int g_taskbarCreated;
 #define WM_APP_TRAY        (WM_APP + 1)
 #define WM_APP_SYNCDONE    (WM_APP + 2)
 #define WM_APP_REMOTECHANGE (WM_APP + 3) // 实时推送：网盘里有改动
+#define WM_APP_CALL        (WM_APP + 4) // 后台线程要在主线程上调的函数
 
 // 文件监视：主循环和自测的消息泵都用
 HANDLE AppWatchHandle() { return g_app && !g_app->exiting ? g_changeNotif : INVALID_HANDLE_VALUE; }
@@ -131,6 +132,7 @@ void StopWatching()
 }
 void PostSyncDone(void* plan) { PostMessageW(g_mainWnd, WM_APP_SYNCDONE, 0, (LPARAM)plan); }
 void PostRemoteChange() { PostMessageW(g_mainWnd, WM_APP_REMOTECHANGE, 0, 0); }
+void Post(void (*fn)(void*), void* ctx) { PostMessageW(g_mainWnd, WM_APP_CALL, (WPARAM)fn, (LPARAM)ctx); }
 void* MainHandle() { return g_mainWnd; }
 void Quit() { PostQuitMessage(0); }
 }
@@ -157,6 +159,7 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_APP_SYNCDONE: SyncOnDone(g_app->sync, (void*)l); return 0;
     case WM_APP_REMOTECHANGE: g_app->OnRemoteChange(); return 0;
+    case WM_APP_CALL: ((void (*)(void*))w)((void*)l); return 0;
     case WM_TIMER: g_app->OnTimer((int)w); return 0;
     case WM_ACTIVATEAPP:
         return 0;
@@ -191,7 +194,7 @@ extern "C" void __stdcall Start()
     GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
     Str dir = PathJoin(Str(appdata), L"DeskNote");
     bool isDefault = true;
-    Str open, testPhase, testOut, syncServer, syncKey, memdiag;
+    Str open, testPhase, testOut, syncServer, syncKey, memdiag, updateUrl;
     for (int i = 1; i + 1 < argc; i++)
     {
         Str a(argv[i]);
@@ -212,6 +215,7 @@ extern "C" void __stdcall Start()
         }
         else if (a.Eq(L"--sync-server")) syncServer = argv[i + 1];
         else if (a.Eq(L"--sync-key")) syncKey = argv[i + 1];
+        else if (a.Eq(L"--update-url")) updateUrl = argv[i + 1];
         else if (a.Eq(L"--memdiag")) memdiag = argv[i + 1];
         else if (a.Eq(L"--theme")) Ui::ForceTheme = Str(argv[i + 1]).Eq(L"light") ? 1 : 2;
         else if (a.Eq(L"--wait-pid"))
@@ -254,6 +258,7 @@ extern "C" void __stdcall Start()
     g_app = new App();
     g_app->isDefaultDir = isDefault;
     g_app->silent = !testPhase.Empty() || !memdiag.Empty();
+    if (updateUrl.n) g_app->updateCheckUrl = updateUrl; // 自测：连模拟服务器
     g_app->Start();
     if (open.Eq(L"trash")) g_app->ShowTrash();
     else if (open.Eq(L"settings")) g_app->ShowSettings();

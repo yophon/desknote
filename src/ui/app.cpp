@@ -4,6 +4,8 @@
 #include "menu.h"
 #include "shell.h"
 #include "syncengine.h"
+#include "update.h"
+#include "plat.h"
 
 App* g_app;
 static Vec<TrashEntry*> g_deadTrash; // 移出回收站的记录：撤销步骤可能还引用着，留到退出
@@ -43,6 +45,8 @@ void App::Start()
     Shell::SetTimer(TimerReminders, 15000);
     Shell::SetTimer(TimerGfx, 1000);
     Shell::SetTimer(TimerBackup, 60 * 60 * 1000);
+    if (!updateCheckUrl.n) updateCheckUrl = UPDATE_URL;
+    Shell::SetTimer(TimerUpdate, 60 * 1000); // 启动 1 分钟后看一眼有没有新版
     sync = SyncCreate();
     SyncStart(sync);
     CheckReminders(); // 关机期间错过的提醒，启动后马上补
@@ -276,6 +280,7 @@ void App::CheckReminders()
 void App::ShowNotice(const Str& title, const Str& text, NoteWin* w)
 {
     balloonNote = w;
+    noticeUrl = Str();
     if (silent) return;
     Shell::Notify(title, text);
 }
@@ -446,6 +451,12 @@ void App::OnTrayMenu(int sx, int sy) { TrayMenu(sx, sy); }
 
 void App::OnNoticeClicked()
 {
+    if (noticeUrl.n)
+    {
+        Wnd::OpenUrl(noticeUrl);
+        noticeUrl = Str();
+        return;
+    }
     if (balloonNote && notes.Contains(balloonNote))
     {
         if (!balloonNote->win) balloonNote->ShowTemporarily(); // 隐藏着：临时显示
@@ -468,5 +479,74 @@ void App::OnTimer(int id)
     case TimerBackup: Store::DailyBackup(); break;
     case TimerFiles: Shell::KillTimer(TimerFiles); CheckFileChanges(); break;
     case TimerRemote: Shell::KillTimer(TimerRemote); SyncNow(sync); break;
+    case TimerUpdate:
+    {
+        Shell::SetTimer(TimerUpdate, 6 * 60 * 60 * 1000); // 之后每 6 小时看一次到没到一天
+        Time last;
+        if (settings.checkUpdates && (!ParseTime(settings.updateCheckedAt, &last) || Now() - last >= TicksPerDay)) CheckUpdate();
+        break;
     }
+    }
+}
+
+// =====================================================================
+// 新版本
+// =====================================================================
+struct UpdateJob
+{
+    Str url, tag, html;
+    bool ok = false;
+};
+
+static bool UpdateBody(void* ctx, const char* d, int n) { ((Bytes*)ctx)->Append(d, n); return true; }
+
+static void UpdateDone(void* p)
+{
+    UpdateJob* j = (UpdateJob*)p;
+    if (g_app && !g_app->exiting) g_app->OnUpdateResult(j->ok, j->tag, j->html);
+    delete j;
+}
+
+static void UpdateThread(void* p)
+{
+    UpdateJob* j = (UpdateJob*)p;
+    Bytes body;
+    Plat::HttpReq q;
+    q.url = j->url;
+    q.headers = L"Accept: application/vnd.github+json\r\n";
+    q.ctx = &body;
+    q.onData = UpdateBody;
+    if (Plat::Http(q, nullptr) == 200) j->ok = ParseLatestRelease(FromUtf8(body.p, body.n), &j->tag, &j->html);
+    Shell::Post(UpdateDone, j);
+}
+
+void App::CheckUpdate()
+{
+    if (updateBusy || !updateCheckUrl.n) return;
+    UpdateJob* j = new UpdateJob();
+    j->url = updateCheckUrl;
+    updateBusy = true;
+    if (!Plat::StartThread(UpdateThread, j)) { updateBusy = false; delete j; }
+}
+
+void App::OnUpdateResult(bool ok, const Str& tag, const Str& url)
+{
+    updateBusy = false;
+    if (!ok) return; // 没网、GitHub 限流：下次再说
+    settings.updateCheckedAt = FormatTime(Now(), true);
+    if (CompareVersions(tag, Str(APP_VERSION)) > 0)
+    {
+        updateVersion = tag;
+        updateUrl = url;
+        if (settings.updateNotified != tag)
+        {
+            settings.updateNotified = tag;
+            balloonNote = nullptr;
+            noticeUrl = url;
+            if (!silent) Shell::Notify(L"DeskNote 有新版 " + tag, Str(L"点这里打开下载页；也可以在设置的「关于」里下载"));
+        }
+    }
+    else { updateVersion = Str(); updateUrl = Str(); }
+    Store::SaveSettings(settings);
+    if (settingsWnd) SettingsWindowSyncStatus(settingsWnd);
 }

@@ -2,6 +2,13 @@
 
 Windows 桌面便签：半透明待办清单，可置底在桌面 / 置顶 / 普通窗口，可折叠成贴边胶囊。单个 exe（约 290KB），不依赖 .NET 和 C 运行库，空闲时私有内存约 3～5MB。
 
+<p align="center"><img src="docs/images/hero.png" width="760" alt="便签和右键菜单"></p>
+
+## 下载
+
+到 [Releases](https://github.com/yophon/desknote/releases) 下载 `DeskNote.exe`，放到任意文件夹直接运行，不用安装。要求 Windows 10 1903+ / Windows 11。
+exe 没有代码签名，第一次从网上下载运行时 Windows 可能提示「已保护你的电脑」，点「更多信息」→「仍要运行」。程序每天会问一次 GitHub 有没有新版，有就提醒（设置 →「关于」里可以关掉）。
+
 ## 功能
 
 - 便签：双击新增或编辑，拖左边距排序，勾选框，撤销/重做（Ctrl+Z / Ctrl+Y），条目里的链接（Ctrl+单击打开），彩色 emoji
@@ -14,6 +21,10 @@ Windows 桌面便签：半透明待办清单，可置底在桌面 / 置顶 / 普
 - 回收站（不自动清理）、每日自动备份（保留 14 天）、开机自启（exe 挪位置后打开一次即自动修正）
 - 同步到 gopan（MCP 密钥；连着实时推送；两边同时改了同一张时按条目合并）
 - 界面跟随系统深浅色和强调色（Win11 样式）
+- 有新版时提醒（每天问一次 GitHub Releases，不会自动下载）
+
+<p align="center"><img src="docs/images/capsule.png" width="360" alt="胶囊和悬停预览"></p>
+<p align="center"><img src="docs/images/dialogs.png" width="760" alt="快速添加、设置提醒、设置、便签管理"></p>
 
 ## 构建与运行
 
@@ -45,6 +56,10 @@ C 风格 C++，不带 C 运行库（自己的内存、字符串、JSON），Dire
 | `src/ui/sync.cpp` | 同步调度：什么时候同步、同步完怎么改便签 |
 | `src/win/` | Windows 外壳：`app_win.cpp`（入口、托盘、通知、快捷键、开机自启、主循环）、`window_win.cpp`（窗口和输入）、`gfx_d2d.cpp`（Direct2D + DirectWrite）、`ui_win.cpp`（画布、系统主题）、`plat_win.cpp`（WinHTTP、DPAPI 等）、`crt_win.cpp`（替代 C 运行库）、`selftest.cpp` |
 | `src/posix/plat_posix.cpp` | 平台层的 macOS / Linux 实现（还没接 HTTP 和密钥保存） |
+
+## 发布
+
+改 `src/core/version.h` 的 `APP_VERSION`，提交后打同名标签（如 `v2.1.0`）推上去：`.github/workflows/release.yml` 会编译、跑回归测试，再把 `DeskNote.exe` 发到 Releases。
 
 ## 测试与调试
 

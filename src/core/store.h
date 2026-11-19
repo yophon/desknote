@@ -71,6 +71,8 @@ struct Settings
     bool quickAddEnabled = true;          // 快速添加：快捷键弹小输入框，加到 quickAddNote
     Str quickAddHotkey = L"Ctrl+Alt+J";
     Str quickAddNote;                     // 便签 id；空或找不到时用第一张
+    bool checkUpdates = true;             // 每天问一次 GitHub 有没有新版
+    Str updateCheckedAt, updateNotified;  // 上次检查的时间；已经提醒过的版本（同一个版本只提醒一次）
     bool autoStartInit = false;
     bool syncEnabled = false;
     Str syncServer = DefaultSyncServer, syncFolder = L"/DeskNote", syncKey;

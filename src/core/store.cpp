@@ -356,6 +356,9 @@ namespace Store
         s.quickAddEnabled = d->Bool(L"quickAddEnabled", s.quickAddEnabled);
         s.quickAddHotkey = d->Str_(L"quickAddHotkey", s.quickAddHotkey.c());
         s.quickAddNote = d->Str_(L"quickAddNote", L"");
+        s.checkUpdates = d->Bool(L"checkUpdates", true);
+        s.updateCheckedAt = d->Str_(L"updateCheckedAt", L"");
+        s.updateNotified = d->Str_(L"updateNotified", L"");
         s.autoStartInit = d->Bool(L"autoStartInit", false);
         s.syncEnabled = d->Bool(L"syncEnabled", false);
         s.syncServer = d->Str_(L"syncServer", DefaultSyncServer);
@@ -371,6 +374,7 @@ namespace Store
         JVal* o = JNewObj();
         o->SetBool(L"hotkeyEnabled", s.hotkeyEnabled)->SetStr(L"hotkey", s.hotkey)
             ->SetBool(L"quickAddEnabled", s.quickAddEnabled)->SetStr(L"quickAddHotkey", s.quickAddHotkey)->SetStr(L"quickAddNote", s.quickAddNote)
+            ->SetBool(L"checkUpdates", s.checkUpdates)->SetStr(L"updateCheckedAt", s.updateCheckedAt)->SetStr(L"updateNotified", s.updateNotified)
             ->SetBool(L"autoStartInit", s.autoStartInit)
             ->SetBool(L"syncEnabled", s.syncEnabled)->SetStr(L"syncServer", s.syncServer)->SetStr(L"syncFolder", s.syncFolder)
             ->SetStr(L"syncKey", Plat::Protect(s.syncKey))->SetBool(L"hardwareRender", s.hardwareRender);

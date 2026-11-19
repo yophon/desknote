@@ -477,6 +477,18 @@ static void Phase1(const Str& server, const Str& key)
 
     if (server.n) SyncTests(server, key);
 
+    // ---- 新版本：问模拟服务器（假装有 v99.0.0）----
+    if (server.n)
+    {
+        app->CheckUpdate();
+        WaitUntil([&]() { return !app->updateBusy; }, 10000);
+        Check(L"检查新版本：发现新版", app->updateVersion.Eq(L"v99.0.0") && app->updateUrl.StartsWith(L"https://"), app->updateVersion);
+        Check(L"检查新版本：记下提醒过的版本和检查时间", app->settings.updateNotified.Eq(L"v99.0.0") && app->settings.updateCheckedAt.n > 0);
+        Check(L"检查新版本：点通知打开下载页", app->noticeUrl.Eq(app->updateUrl.c()));
+        app->ShowNotice(Str(L"t"), Str(L"x"), app->notes[0]);
+        Check(L"别的通知不会打开下载页", app->noticeUrl.Empty());
+    }
+
     // ---- 交互：直接给窗口发系统消息（不动真鼠标、不抢焦点），走完整的「系统消息 → 事件 → 逻辑」 ----
     {
         bool keepFocus = NoteWin::debugNoFocus;

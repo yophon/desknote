@@ -98,6 +98,15 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/releases/latest":
+            # 新版本检查（自测用）：假装有个很新的版本
+            body = json.dumps({"tag_name": "v99.0.0", "html_url": "https://example.com/desknote/releases/v99.0.0", "draft": False}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/api/events":
             self.send_response(404); self.end_headers(); return
         if self.headers.get("Authorization") != "Bearer " + KEY:

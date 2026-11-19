@@ -1,0 +1,35 @@
+# 打 v 开头的标签（和 src/core/version.h 的 APP_VERSION 一致）：编译、测试、发布 exe 到 GitHub Releases
+# 程序每天问一次 releases/latest，发布后用户会收到新版提醒
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: 标签要和代码里的版本号一致
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path src/core/version.h -Pattern 'APP_VERSION L"([^"]+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "标签 ${{ github.ref_name }} 和 APP_VERSION $v 不一致" }
+      - name: 编译
+        shell: cmd
+        run: build.cmd "%RUNNER_TEMP%\DeskNote.exe"
+      - name: 回归测试
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\selftest.ps1
+      - name: 发布
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "下载 DeskNote.exe，放到任意文件夹直接运行（不用安装）。要求 Windows 10 1903+ / Windows 11。`n`n首次从网上下载运行时 Windows 可能提示「已保护你的电脑」（exe 没有代码签名），点「更多信息」→「仍要运行」。"
+          gh release create "${{ github.ref_name }}" "$env:RUNNER_TEMP\DeskNote.exe" --title "DeskNote ${{ github.ref_name }}" --notes "$notes" --generate-notes

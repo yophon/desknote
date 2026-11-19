@@ -356,7 +356,7 @@ void TrashWindowRefresh(Window* w)
 // =====================================================================
 // 设置：仿 Win11 设置页（分组标题 + 卡片 + 开关），整页自绘，只有三个输入框用系统控件
 // =====================================================================
-enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave, SOpenGopan, SLinkRepo, SLinkGopanRepo, SLinkGopanWeb, SQkToggle, SQkKeys };
+enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave, SOpenGopan, SLinkRepo, SLinkGopanRepo, SLinkGopanWeb, SQkToggle, SQkKeys, SUpdToggle, SUpdDownload };
 struct HitArea { int id; RectF r; };
 
 struct SettingsWin : WinHandler
@@ -666,7 +666,25 @@ struct SettingsWin : WinHandler
             Link(rt, links[i].id, links[i].url, R - 16 - w, cy);
             y += 36;
         }
-        y += 8 + 24;
+        y += 8 + 4;
+        {
+            bool has = g_app->updateVersion.n > 0;
+            Str desc;
+            u32 dc = T.text2;
+            if (has) { desc = L"有新版 " + g_app->updateVersion + L"，点「下载」打开发布页"; dc = T.accent; }
+            else
+            {
+                desc = L"每天问一次 GitHub 有没有新版，有就提醒；不会自动下载";
+                if (s.updateCheckedAt.n) desc += L" · 上次检查 " + s.updateCheckedAt.Sub(0, 16);
+            }
+            Str dl(L"下载");
+            float bw = Max(88.f, Ui::Measure(dl, 14, 400) + 24);
+            c = Card(rt, y, 0xE896, Str(L"检查新版本"), desc, dc, 84 + (has ? bw + 12 : 0), true, 0);
+            float cy = (c.top + c.bottom) / 2;
+            Toggle(rt, SUpdToggle, s.checkUpdates, true, R - 16, cy);
+            if (has) Button(rt, SUpdDownload, L"下载", R - 16 - 84 - 12, cy, true);
+        }
+        y += 24;
         contentH = y;
     }
 
@@ -827,6 +845,12 @@ struct SettingsWin : WinHandler
         case SLinkRepo: Wnd::OpenUrl(Str(URL_DESKNOTE_REPO)); break;
         case SLinkGopanRepo: Wnd::OpenUrl(Str(URL_GOPAN_REPO)); break;
         case SLinkGopanWeb: Wnd::OpenUrl(Str(URL_GOPAN_WEB)); break;
+        case SUpdToggle:
+            s.checkUpdates = !s.checkUpdates;
+            Store::SaveSettings(s);
+            if (s.checkUpdates) g_app->CheckUpdate();
+            break;
+        case SUpdDownload: if (g_app->updateUrl.n) Wnd::OpenUrl(g_app->updateUrl); break;
         }
         Invalidate();
     }

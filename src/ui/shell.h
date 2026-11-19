@@ -20,6 +20,7 @@ namespace Shell
     void StopWatching();
     void PostSyncDone(void* plan);                   // 后台线程里调：回到主线程交给 SyncOnDone
     void PostRemoteChange();                         // 后台线程里调：回到主线程交给 App::OnRemoteChange
+    void Post(void (*fn)(void* ctx), void* ctx);     // 后台线程里调：回到主线程调 fn(ctx)
     void* MainHandle();                              // 托盘菜单的主人（平台句柄）
     void Quit();                                     // 退出主循环
 }

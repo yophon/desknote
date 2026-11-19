@@ -6,6 +6,7 @@
 #include "store.h"
 #include "links.h"
 #include "syncengine.h"
+#include "update.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
@@ -201,6 +202,16 @@ static void TestRepeat()
     delete j;
 }
 
+static void TestUpdate()
+{
+    Check("版本比较", CompareVersions(Str(L"v2.1.0"), Str(L"2.0.0")) > 0 && CompareVersions(Str(L"2.0.10"), Str(L"v2.0.9")) > 0 &&
+                         CompareVersions(Str(L"2.0"), Str(L"v2.0.0")) == 0 && CompareVersions(Str(L"1.9.9"), Str(L"2.0.0")) < 0);
+    Str tag, url;
+    Check("解析发布信息", ParseLatestRelease(Str(L"{\"tag_name\":\"v2.1.0\",\"html_url\":\"https://github.com/yophon/desknote/releases/tag/v2.1.0\",\"draft\":false}"), &tag, &url) &&
+                         tag.Eq(L"v2.1.0") && url.StartsWith(L"https://github.com/"));
+    Check("坏的发布信息", !ParseLatestRelease(Str(L"{\"message\":\"Not Found\"}"), &tag, &url) && !ParseLatestRelease(Str(L"oops"), &tag, &url));
+}
+
 static void TestLinks()
 {
     Vec<LinkSpan> l;
@@ -245,6 +256,7 @@ int main(int argc, char** argv)
     TestStore(root);
     TestLinks();
     TestRepeat();
+    TestUpdate();
     TestMerge();
     if (g_fail) printf("FAILED %d\n", g_fail);
     else printf("ALL PASSED %d\n", g_pass);

@@ -18,7 +18,7 @@ $syncArgs = @()
 if ($py) {
     $mock = Start-Process $py.Source -ArgumentList "-I", "`"$root\tests\mock_gopan.py`"", $port, $key -PassThru -WindowStyle Hidden
     Start-Sleep -Milliseconds 800
-    $syncArgs = @('--sync-server', "http://127.0.0.1:$port", '--sync-key', $key)
+    $syncArgs = @('--sync-server', "http://127.0.0.1:$port", '--sync-key', $key, '--update-url', "http://127.0.0.1:$port/releases/latest")
 } else { Write-Host 'SKIP 同步测试（没有 python）' }
 
 $ok = $true
