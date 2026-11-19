@@ -1,4 +1,4 @@
-// 回收站窗口、提醒对话框（系统控件），设置窗口（自绘）
+// 回收站、设置窗口（自绘），提醒对话框（系统控件）
 #include "ui.h"
 #include <dwmapi.h>
 #include <commctrl.h>
@@ -166,156 +166,338 @@ Str HotkeyFormat(UINT mods, UINT vk)
 }
 
 // =====================================================================
-// 回收站：查看、恢复、彻底删除；不自动清理
+// 回收站：按删除日期分组的卡片列表，每行带“恢复”和“彻底删除”；不自动清理
 // =====================================================================
-enum { IdList = 10, IdRestore, IdPurge, IdEmpty, IdClose };
-struct TrashDlg : DlgBase
+static void ApplyFrameTheme(HWND h);
+
+struct TrashWin
 {
-    HWND list = nullptr, hdr = nullptr, bRestore, bPurge, bEmpty, bClose;
-    void Build()
+    HWND hwnd = nullptr;
+    int dpi = 96;
+    float S() const { return dpi / 96.f; }
+    struct Hit { int id; D2D1_RECT_F r; TrashEntry* e; };
+    Vec<Hit> hits;            // 列表里的区域是内容坐标（要加滚动），顶栏是窗口坐标
+    int hover = 0, press = 0;
+    TrashEntry* hoverEntry = nullptr;
+    bool tracking = false;
+    float scroll = 0, contentH = 0, listTop = 0;
+    enum { HEmpty = 1, HRow = 2, HRestore = 3, HPurge = 4 };
+
+    void Invalidate() { InvalidateRect(hwnd, nullptr, FALSE); }
+    float ClientW() { RECT rc; GetClientRect(hwnd, &rc); return rc.right / S(); }
+    float ClientH() { RECT rc; GetClientRect(hwnd, &rc); return rc.bottom / S(); }
+    void ClampScroll() { scroll = Clamp(scroll, 0.f, Max(0.f, contentH - (ClientH() - listTop))); }
+
+    static Str DayLabel(Time t)
     {
-        hdr = Hint(L"删掉的条目和便签都在这里，不会自动清理。恢复的条目会放回原来那张便签的原位置。", 16, 12, 528, 36);
-        list = Add(WC_LISTVIEWW, L"", WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS, 16, 52, 528, 400, IdList);
-        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-        const wchar_t* cols[] = { L"内容", L"来自", L"删除时间" };
-        int widths[] = { 290, 120, 130 };
-        for (int i = 0; i < 3; i++)
-        {
-            LVCOLUMNW c = {};
-            c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM | LVCF_FMT;
-            c.fmt = LVCFMT_LEFT;
-            c.pszText = (LPWSTR)cols[i];
-            c.cx = (int)(widths[i] * S());
-            c.iSubItem = i;
-            LRESULT rr = SendMessageW(list, LVM_INSERTCOLUMNW, i, (LPARAM)&c);
-            (void)rr;
-        }
-        bRestore = Add(L"BUTTON", L"恢复", WS_TABSTOP | BS_PUSHBUTTON, 16, 464, 88, 28, IdRestore);
-        bPurge = Add(L"BUTTON", L"彻底删除", WS_TABSTOP | BS_PUSHBUTTON, 112, 464, 88, 28, IdPurge);
-        bEmpty = Add(L"BUTTON", L"清空回收站", WS_TABSTOP | BS_PUSHBUTTON, 360, 464, 96, 28, IdEmpty);
-        bClose = Add(L"BUTTON", L"关闭", WS_TABSTOP | BS_PUSHBUTTON, 464, 464, 80, 28, IdClose);
-        Refresh();
+        SYSTEMTIME st;
+        SplitTime(t, &st);
+        Time day = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+        Time today = Today();
+        if (day == today) return Str(L"今天");
+        if (day == today - TicksPerDay) return Str(L"昨天");
+        SYSTEMTIME now;
+        GetLocalTime(&now);
+        Str s;
+        if (st.wYear != now.wYear) s.Int(st.wYear).Append(L"年");
+        s.Int(st.wMonth).Append(L"月").Int(st.wDay).Append(L"日");
+        return s;
     }
-    void Layout()
+    static Time DayOf(Time t)
     {
+        SYSTEMTIME st;
+        SplitTime(t, &st);
+        return MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+    }
+
+    // 普通按钮 / 图标按钮
+    void DrawButton(ID2D1RenderTarget* rt, D2D1_RECT_F r, const wchar_t* text, wchar_t icon, bool hot, bool down, bool enabled, bool danger)
+    {
+        const Ui::Theme& T = Ui::T;
+        if (text)
+        {
+            Ui::Fill(rt, r, 4, Ui::Solid(down ? T.ctrlPress : hot ? T.ctrlHover : T.ctrlFill, T.cardBg));
+            Ui::Stroke(rt, r, 4, T.ctrlBorder, 1);
+            if (!T.dark) Ui::Line(rt, r.left + 4, r.bottom - 0.5f, r.right - 4, r.bottom - 0.5f, T.ctrlBorderBottom, 1);
+            Ui::Text(rt, Str(text), r, 14, 400, !enabled ? T.disabled : down ? T.text2 : T.text, Ui::Center);
+        }
+        else
+        {
+            if (hot) Ui::Fill(rt, r, 4, down ? T.subtlePress : T.subtleHover);
+            Ui::Icon(rt, icon, (r.left + r.right) / 2, (r.top + r.bottom) / 2, 16, hot && danger ? T.critical : T.text2);
+        }
+    }
+
+    void Build(ID2D1RenderTarget* rt)
+    {
+        hits.Clear();
+        const Ui::Theme& T = Ui::T;
+        float W = ClientW(), H = ClientH();
+        const float L = 24, R = W - 24;
+        Vec<TrashEntry*>& list = g_app->trash;
+
+        // ---- 顶栏（不随列表滚动）----
+        float y = 18;
+        Str count;
+        if (list.n) count.Int(list.n).Append(L" 项");
+        Str emptyText(L"清空回收站");
+        float bw = Ui::Measure(emptyText, 14, 400) + 24;
+        D2D1_RECT_F eb = D2D1::RectF(R - bw, y, R, y + 32);
+        if (list.n) { Hit h = { HEmpty, eb, nullptr }; hits.Push(h); }
+        if (rt)
+        {
+            float tw = Ui::Text(rt, Str(L"回收站"), D2D1::RectF(L, y, R - bw - 16, y + 32), 20, 600, T.text);
+            if (count.n) Ui::Text(rt, count, D2D1::RectF(L + tw + 10, y + 4, R - bw - 16, y + 32), 14, 400, T.text2);
+            DrawButton(rt, eb, emptyText.c(), 0, hover == HEmpty, press == HEmpty, list.n > 0, false);
+        }
+        y += 32 + 6;
+        Str hint(L"删掉的条目和便签都在这里，不会自动清理。恢复的条目会放回原来那张便签的原位置；双击一行也能恢复。");
+        float hh = Ui::MeasureWrap(hint, R - L, 12, 400);
+        if (rt) Ui::TextWrap(rt, hint, L, y, R - L, 12, 400, T.text2);
+        y += hh + 14;
+        listTop = y;
+
+        // ---- 列表 ----
+        if (!list.n)
+        {
+            if (rt)
+            {
+                float cy = listTop + (H - listTop) * 0.4f;
+                Ui::Icon(rt, 0xE7B8, W / 2, cy - 28, 40, T.text3);
+                Ui::Text(rt, Str(L"回收站是空的"), D2D1::RectF(L, cy + 6, R, cy + 30), 14, 400, T.text2, Ui::Center);
+                Ui::Text(rt, Str(L"删除的条目和便签会先放在这里"), D2D1::RectF(L, cy + 30, R, cy + 50), 12, 400, T.text3, Ui::Center);
+            }
+            contentH = 0;
+            return;
+        }
+        if (rt)
+        {
+            rt->PushAxisAlignedClip(D2D1::RectF(0, listTop, W, H), D2D1_ANTIALIAS_MODE_ALIASED);
+            rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -scroll));
+        }
+        float ly = listTop;
+        Time lastDay = -1;
+        const float rowH = 62;
+        for (int i = 0; i < list.n; i++)
+        {
+            TrashEntry* e = list[i];
+            Time day = DayOf(e->deletedAt);
+            if (day != lastDay)
+            {
+                if (lastDay != -1) ly += 14;
+                if (rt) Ui::Text(rt, DayLabel(e->deletedAt), D2D1::RectF(L, ly, R, ly + 20), 14, 600, T.text);
+                ly += 20 + 8;
+                lastDay = day;
+            }
+            D2D1_RECT_F card = D2D1::RectF(L, ly, R, ly + rowH);
+            float cy = ly + rowH / 2;
+            D2D1_RECT_F purge = D2D1::RectF(R - 12 - 32, cy - 16, R - 12, cy + 16);
+            Str restoreText(L"恢复");
+            float rw = Max(72.f, Ui::Measure(restoreText, 14, 400) + 24);
+            D2D1_RECT_F restore = D2D1::RectF(purge.left - 8 - rw, cy - 16, purge.left - 8, cy + 16);
+            Hit h1 = { HRow, card, e }, h2 = { HRestore, restore, e }, h3 = { HPurge, purge, e };
+            hits.Push(h1); hits.Push(h2); hits.Push(h3);
+            // 只画看得见的行
+            if (rt && ly - scroll < H && ly + rowH - scroll > listTop)
+            {
+                bool rowHot = hoverEntry == e;
+                Ui::Fill(rt, card, 4, rowHot ? Ui::Solid(T.subtleHover, T.cardBg) : T.cardBg);
+                Ui::Stroke(rt, card, 4, T.cardBorder, 1);
+                bool isNote = e->kind.Eq(L"note") && e->note;
+                Ui::Icon(rt, isNote ? 0xE70B : e->item.done ? 0xE9D5 : 0xE7C3, L + 16 + 10, cy, 20, T.text2);
+                Str main, sub;
+                if (isNote)
+                {
+                    main = L"便签「" + e->note->title + L"」";
+                    sub = L"整张便签 · ";
+                    sub.Int(e->note->items.n).Append(L" 条");
+                }
+                else
+                {
+                    main = e->item.text.Replace(L"\r", L"").Replace(L"\n", L" ");
+                    sub = L"来自「" + e->noteTitle + L"」";
+                    if (e->item.done) sub += L" · 已完成";
+                }
+                SYSTEMTIME st;
+                SplitTime(e->deletedAt, &st);
+                sub += L" · ";
+                sub.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute).Append(L" 删除");
+                float textL = L + 16 + 20 + 16, textR = restore.left - 16;
+                Ui::Text(rt, main, D2D1::RectF(textL, cy - 19, textR, cy + 1), 14, 400, T.text);
+                Ui::Text(rt, sub, D2D1::RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
+                bool hr = hover == HRestore && hoverEntry == e, hp = hover == HPurge && hoverEntry == e;
+                DrawButton(rt, restore, restoreText.c(), 0, hr, hr && press == HRestore, true, false);
+                DrawButton(rt, purge, nullptr, 0xE74D, hp, hp && press == HPurge, true, true);
+            }
+            ly += rowH + 4;
+        }
+        ly += 20;
+        contentH = ly - listTop;
+        if (rt)
+        {
+            rt->SetTransform(D2D1::Matrix3x2F::Identity());
+            rt->PopAxisAlignedClip();
+            float viewH = H - listTop;
+            if (contentH > viewH + 1)
+            {
+                float th = Max(24.f, viewH * viewH / contentH);
+                float ty = listTop + (viewH - th) * Clamp(scroll / (contentH - viewH), 0.f, 1.f);
+                Ui::Fill(rt, D2D1::RectF(W - 7, ty + 2, W - 4, ty + th - 2), 1.5f, T.text3);
+            }
+        }
+    }
+
+    void Paint()
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
-        int W = (int)(rc.right / S()), H = (int)(rc.bottom / S());
-        auto place = [&](HWND h, int x, int y, int w, int ht) {
-            for (int i = 0; i < ctls.n; i++) if (ctls[i].h == h) { ctls[i].x = x; ctls[i].y = y; ctls[i].w = w; ctls[i].ht = ht; }
-            MoveWindow(h, (int)(x * S()), (int)(y * S()), (int)(w * S()), (int)(ht * S()), TRUE);
-        };
-        place(hdr, 16, 12, W - 32, 36);
-        place(list, 16, 52, W - 32, H - 52 - 52);
-        place(bRestore, 16, H - 40, 88, 28);
-        place(bPurge, 112, H - 40, 88, 28);
-        place(bEmpty, W - 16 - 80 - 8 - 96, H - 40, 96, 28);
-        place(bClose, W - 16 - 80, H - 40, 80, 28);
-        // 列宽按当前 DPI 和列表宽度重新分配（窗口挪到缩放不同的屏幕后也对）
-        RECT lr;
-        GetClientRect(list, &lr);
-        int c1 = (int)(120 * S()), c2 = (int)(130 * S());
-        ListView_SetColumnWidth(list, 1, c1);
-        ListView_SetColumnWidth(list, 2, c2);
-        ListView_SetColumnWidth(list, 0, Max(60, (int)lr.right - c1 - c2 - 2));
+        Canvas c;
+        if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
+        {
+            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
+            c.rt->Clear(&bg);
+            Build(c.rt);
+        }
+        c.EndBlt(dc);
+        EndPaint(hwnd, &ps);
     }
+
+    // 返回命中区域的 id，并给出对应条目
+    int HitAt(int px, int py, TrashEntry** e)
+    {
+        float x = px / S(), y = py / S();
+        *e = nullptr;
+        for (int i = hits.n - 1; i >= 0; i--)
+        {
+            const Hit& h = hits[i];
+            float yy = h.e ? y + scroll : y;
+            if (h.e && y < listTop) continue;
+            if (x >= h.r.left && x < h.r.right && yy >= h.r.top && yy < h.r.bottom) { *e = h.e; return h.id; }
+        }
+        return 0;
+    }
+
+    void Activate(int id, TrashEntry* e)
+    {
+        if (id == HEmpty)
+        {
+            Str msg(L"彻底删除回收站里的全部 ");
+            msg.Int(g_app->trash.n).Append(L" 项？删除后不能恢复。");
+            if (MessageBoxW(hwnd, msg.c(), L"清空回收站", MB_OKCANCEL | MB_ICONWARNING) == IDOK) g_app->EmptyTrash();
+            return;
+        }
+        if (!e || !g_app->trash.Contains(e)) return;
+        if (id == HRestore) g_app->Restore(e);
+        else if (id == HPurge) g_app->Purge(e);
+    }
+
     void Refresh()
     {
-        ListView_DeleteAllItems(list);
-        for (int i = 0; i < g_app->trash.n; i++)
-        {
-            TrashEntry* e = g_app->trash[i];
-            Str main, from;
-            if (e->kind.Eq(L"note") && e->note)
-            {
-                main = L"便签「" + e->note->title + L"」";
-                from = L"整张便签 · ";
-                from.Int(e->note->items.n).Append(L" 条");
-            }
-            else
-            {
-                main = e->item.text.Replace(L"\n", L" ");
-                from = L"「" + e->noteTitle + L"」";
-                if (e->item.done) from += L" · 已完成";
-            }
-            Str when = FormatTime(e->deletedAt, false);
-            LVITEMW it = {};
-            it.mask = LVIF_TEXT | LVIF_PARAM;
-            it.iItem = i;
-            it.pszText = (LPWSTR)main.c();
-            it.lParam = (LPARAM)e;
-            int idx = ListView_InsertItem(list, &it);
-            ListView_SetItemText(list, idx, 1, (LPWSTR)from.c());
-            ListView_SetItemText(list, idx, 2, (LPWSTR)when.c());
-        }
-        EnableWindow(bEmpty, g_app->trash.n > 0);
-        UpdateButtons();
+        TrashEntry* e = nullptr;
+        if (hoverEntry && !g_app->trash.Contains(hoverEntry)) { hoverEntry = nullptr; hover = 0; }
+        (void)e;
+        Build(nullptr);
+        ClampScroll();
+        Invalidate();
     }
-    void UpdateButtons()
-    {
-        bool sel = ListView_GetSelectedCount(list) > 0;
-        EnableWindow(bRestore, sel);
-        EnableWindow(bPurge, sel);
-    }
-    void Selected(Vec<TrashEntry*>& out)
-    {
-        int i = -1;
-        while ((i = ListView_GetNextItem(list, i, LVNI_SELECTED)) >= 0)
-        {
-            LVITEMW it = {};
-            it.mask = LVIF_PARAM;
-            it.iItem = i;
-            ListView_GetItem(list, &it);
-            out.Push((TrashEntry*)it.lParam);
-        }
-    }
+
     static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
     {
-        TrashDlg* self = (TrashDlg*)GetWindowLongPtrW(h, GWLP_USERDATA);
+        TrashWin* self = (TrashWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
         if (m == WM_NCCREATE)
         {
-            self = (TrashDlg*)((CREATESTRUCTW*)l)->lpCreateParams;
+            self = (TrashWin*)((CREATESTRUCTW*)l)->lpCreateParams;
             self->hwnd = h;
             SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
         }
         if (!self) return DefWindowProcW(h, m, w, l);
-        LRESULT r;
-        if (self->Common(m, w, l, &r)) { if (m == WM_DPICHANGED) self->Layout(); return r; }
         switch (m)
         {
-        case WM_SIZE: self->Layout(); return 0;
+        case WM_PAINT: self->Paint(); return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_SIZE: self->Build(nullptr); self->ClampScroll(); self->Invalidate(); return 0;
         case WM_GETMINMAXINFO:
-            ((MINMAXINFO*)l)->ptMinTrackSize.x = (int)(380 * self->S());
-            ((MINMAXINFO*)l)->ptMinTrackSize.y = (int)(300 * self->S());
+            ((MINMAXINFO*)l)->ptMinTrackSize.x = (int)(440 * self->S());
+            ((MINMAXINFO*)l)->ptMinTrackSize.y = (int)(320 * self->S());
             return 0;
-        case WM_NOTIFY:
+        case WM_MOUSEMOVE:
         {
-            NMHDR* nh = (NMHDR*)l;
-            if (nh->idFrom == IdList && nh->code == LVN_ITEMCHANGED) self->UpdateButtons();
-            if (nh->idFrom == IdList && nh->code == NM_DBLCLK) SendMessageW(h, WM_COMMAND, IdRestore, 0);
+            if (!self->tracking)
+            {
+                TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
+                TrackMouseEvent(&t);
+                self->tracking = true;
+            }
+            TrashEntry* e;
+            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e);
+            if (id != self->hover || e != self->hoverEntry) { self->hover = id; self->hoverEntry = e; self->Invalidate(); }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            self->tracking = false;
+            self->hover = 0;
+            self->hoverEntry = nullptr;
+            self->Invalidate();
+            return 0;
+        case WM_LBUTTONDOWN:
+        {
+            TrashEntry* e;
+            self->press = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e);
+            if (self->press) SetCapture(h);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        {
+            int p = self->press;
+            self->press = 0;
+            if (GetCapture() == h) ReleaseCapture();
+            TrashEntry* e;
+            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e);
+            if (p && id == p && p != HRow) self->Activate(p, e);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_LBUTTONDBLCLK:
+        {
+            TrashEntry* e;
+            if (self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e) == HRow) self->Activate(HRestore, e);
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+        {
+            float old = self->scroll;
+            self->scroll -= GET_WHEEL_DELTA_WPARAM(w) / 120.f * 66;
+            self->ClampScroll();
+            if (self->scroll != old)
+            {
+                POINT p;
+                GetCursorPos(&p);
+                ScreenToClient(h, &p);
+                TrashEntry* e;
+                self->Build(nullptr);
+                self->hover = self->HitAt(p.x, p.y, &e);
+                self->hoverEntry = e;
+                self->Invalidate();
+            }
             return 0;
         }
         case WM_COMMAND:
-            switch (LOWORD(w))
-            {
-            case IdRestore: case IdPurge:
-            {
-                Vec<TrashEntry*> sel;
-                self->Selected(sel);
-                for (int i = 0; i < sel.n; i++)
-                    if (g_app->trash.Contains(sel[i])) { if (LOWORD(w) == IdRestore) g_app->Restore(sel[i]); else g_app->Purge(sel[i]); }
-                return 0;
-            }
-            case IdEmpty:
-            {
-                Str msg(L"彻底删除回收站里的全部 ");
-                msg.Int(g_app->trash.n).Append(L" 项？删除后不能恢复。");
-                if (MessageBoxW(h, msg.c(), L"清空回收站", MB_OKCANCEL | MB_ICONWARNING) == IDOK) g_app->EmptyTrash();
-                return 0;
-            }
-            case IdClose: case IDCANCEL: DestroyWindow(h); return 0;
-            }
+            if (LOWORD(w) == IDCANCEL) DestroyWindow(h);
             return 0;
+        case WM_DPICHANGED:
+        {
+            self->dpi = HIWORD(w);
+            RECT* rc = (RECT*)l;
+            SetWindowPos(h, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+            if (l && WEq((const wchar_t*)l, L"ImmersiveColorSet")) { Ui::LoadTheme(); ApplyFrameTheme(h); self->Invalidate(); }
+            break;
         case WM_CLOSE: DestroyWindow(h); return 0;
         case WM_DESTROY:
             g_app->trashWnd = nullptr;
@@ -329,21 +511,30 @@ struct TrashDlg : DlgBase
 
 HWND TrashWindowCreate()
 {
-    TrashDlg* d = new TrashDlg();
+    Ui::LoadTheme();
+    TrashWin* d = new TrashWin();
     HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"DeskNoteTrash", L"DeskNote 回收站", WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
                              CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, g_inst, d);
     d->dpi = GetDpiForWindow(h);
     SetIcons(h);
-    d->Build();
-    d->SizeClient(560, 510);
-    d->Center();
-    d->Layout();
+    ApplyFrameTheme(h);
+    POINT p;
+    GetCursorPos(&p);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
+    float S = d->S();
+    int maxH = (int)((mi.rcWork.bottom - mi.rcWork.top) * 0.85f);
+    RECT r = { 0, 0, (int)(640 * S), Min((int)(580 * S), maxH) };
+    AdjustWindowRectExForDpi(&r, GetWindowLongW(h, GWL_STYLE), FALSE, GetWindowLongW(h, GWL_EXSTYLE), d->dpi);
+    int w = r.right - r.left, ht = r.bottom - r.top;
+    SetWindowPos(h, nullptr, (mi.rcWork.left + mi.rcWork.right - w) / 2, (mi.rcWork.top + mi.rcWork.bottom - ht) / 2, w, ht, SWP_NOZORDER | SWP_NOACTIVATE);
+    d->Build(nullptr);
     return h;
 }
 
 void TrashWindowRefresh(HWND w)
 {
-    TrashDlg* d = (TrashDlg*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    TrashWin* d = (TrashWin*)GetWindowLongPtrW(w, GWLP_USERDATA);
     if (d) d->Refresh();
 }
 
@@ -1129,9 +1320,9 @@ void RegisterDialogClasses()
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
-    wc.lpfnWndProc = TrashDlg::Proc; wc.lpszClassName = L"DeskNoteTrash"; RegisterClassW(&wc);
     wc.lpfnWndProc = ReminderDlg::Proc; wc.lpszClassName = L"DeskNoteReminder"; RegisterClassW(&wc);
     wc.style = CS_DBLCLKS;
     wc.hbrBackground = nullptr;
     wc.lpfnWndProc = SettingsWin::Proc; wc.lpszClassName = L"DeskNoteSettings"; RegisterClassW(&wc);
+    wc.lpfnWndProc = TrashWin::Proc; wc.lpszClassName = L"DeskNoteTrash"; RegisterClassW(&wc);
 }

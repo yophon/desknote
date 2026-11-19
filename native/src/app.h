@@ -34,7 +34,7 @@ struct UndoStep
     Vec<TrashEntry*> trashed;
 };
 
-struct RowInfo { int index; float top, bottom, textLeft; };
+struct RowInfo { int index; float top, bottom, textLeft, chipLeft; }; // chipLeft：提醒标签左边，0 = 没有
 
 class NoteWin
 {
@@ -73,6 +73,7 @@ public:
     // 自测、调界面用
     void DebugPreview() { Collapse(); ShowPreview(); KillTimer(hwnd, 1); }
     void DebugMenu(int sub);
+    void DebugHover(int row, int btn) { hover = true; hoverRow = row; hoverBtn = btn; Render(); }
     void OnMenuLive(int id, float v);
     void TestTypeItem(int index, const wchar_t* text);
     void TestBeginEdit(int index, const wchar_t* text);
@@ -105,8 +106,10 @@ private:
     // 布局（上次绘制的结果，用于命中测试；单位 DIP，内容坐标）
     Vec<RowInfo> rows;
     float titleBottom = 0, contentHeight = 0, scrollY = 0;
-    D2D1_RECT_F collapseBtn = {};
-    bool hover = false, hoverCollapse = false;
+    D2D1_RECT_F toolBtn[3] = {};   // 标题栏右侧：新增、菜单、折叠（悬停时出现）
+    int hoverBtn = 0, hoverRow = -1;
+    bool hover = false;
+    int HitToolbar(float xDip, float yDip) const;
     bool sizing = false;
     bool menuChanged = false;
     int HitRow(float yDip) const;

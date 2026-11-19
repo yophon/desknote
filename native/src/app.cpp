@@ -612,6 +612,7 @@ extern "C" void __stdcall Start()
     else if (open.Eq(L"edit") && g_app->notes.n) g_app->notes[0]->BeginEdit(0);            // 调界面用
     else if (open.Eq(L"capsule") && g_app->notes.n) g_app->notes[0]->Collapse();
     else if (open.Eq(L"preview") && g_app->notes.n) g_app->notes[0]->DebugPreview();
+    else if (open.Eq(L"hover") && g_app->notes.n) g_app->notes[0]->DebugHover(1, 2);
     else if (open.StartsWith(L"menu") && g_app->notes.n) g_app->notes[0]->DebugMenu((int)ParseInt(open.Sub(4), 0));
     else if (open.Eq(L"traymenu"))
     {
