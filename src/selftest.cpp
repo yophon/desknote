@@ -166,6 +166,24 @@ static void SyncTests(const Str& server, const Str& key)
     Check(L"拉取后没有冲突副本", app->notes.n == 2, Num(app->notes.n));
     WaitUntil(idle, 10000);
 
+    // 实时推送(gopan doc/39 五):别的电脑一改,不用等定时拉取,几秒内就拉下来
+    WaitUntil([&]() { return SyncLiveConnected(); }, 8000);
+    Check(L"连上了实时推送", SyncLiveConnected());
+    {
+        Str t = RemoteRead(server, key, path, &sha);
+        NoteData* o = NoteData::FromContentJson(t, a->d->id);
+        NoteItem li; li.text = L"推送带来的";
+        o->items.Push(li);
+        RemoteWrite(server, key, path, o->ContentJson(), sha);
+        delete o;
+        DWORD t0 = GetTickCount();
+        WaitUntil([&]() { return HasItem(a->d, L"推送带来的"); }, 5000);
+        Str ms;
+        ms.Int((int)(GetTickCount() - t0)).Append(L" ms");
+        Check(L"远端一改几秒内自动拉下来(没手动同步)", HasItem(a->d, L"推送带来的"), ms);
+        WaitUntil(idle, 10000);
+    }
+
     // 本地改：几秒后自动推上去
     a->TestTypeItem(a->d->items.n, L"本地刚加的");
     WaitUntil([&]() { return RemoteRead(server, key, path, nullptr).Find(L"本地刚加的") >= 0; }, 15000);

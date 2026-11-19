@@ -15,6 +15,7 @@
 // 程序内部消息
 #define WM_APP_TRAY        (WM_APP + 1)
 #define WM_APP_SYNCDONE    (WM_APP + 2)
+#define WM_APP_REMOTECHANGE (WM_APP + 3) // 实时推送：网盘里有改动
 
 // ---------------------------------------------------------------------
 // 绘图资源：Direct2D/DirectWrite 工厂，用时创建，空闲几秒后整体释放（省内存）
@@ -224,6 +225,7 @@ const Str& SyncStatus(Syncer* s);
 bool SyncFailed(Syncer* s);
 Str SyncNormFolder(const Str& f);
 bool SyncBusy(Syncer* s);
+bool SyncLiveConnected(); // 实时推送连着没有
 
 // ---------------------------------------------------------------------
 // 程序主体

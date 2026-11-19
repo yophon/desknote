@@ -8,7 +8,7 @@ HINSTANCE g_inst;
 void RunGlobalCtors();
 
 static const wchar_t* RunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-enum { TimerReminders = 1, TimerGfx = 2, TimerBackup = 3, TimerFiles = 4, TimerSync = 5 };
+enum { TimerReminders = 1, TimerGfx = 2, TimerBackup = 3, TimerFiles = 4, TimerSync = 5, TimerRemote = 6 };
 static HANDLE g_changeNotif = INVALID_HANDLE_VALUE;
 static Vec<TrashEntry*> g_deadTrash; // 移出回收站的记录：撤销步骤可能还引用着，留到退出
 static int g_taskbarCreated;
@@ -478,6 +478,10 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     case WM_APP_SYNCDONE: SyncOnDone(g_app->sync, l); return 0;
+    case WM_APP_REMOTECHANGE:
+        // 网盘里有改动：稍等一下，连着来的几条合成一次同步
+        SetTimer(h, TimerRemote, 300, nullptr);
+        return 0;
     case WM_TIMER:
         switch (w)
         {
@@ -485,6 +489,7 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l)
         case TimerGfx: Gfx::ReleaseIfIdle(); SyncTick(g_app->sync); break;
         case TimerBackup: Store::DailyBackup(); break;
         case TimerFiles: KillTimer(h, TimerFiles); g_app->CheckFileChanges(); break;
+        case TimerRemote: KillTimer(h, TimerRemote); SyncNow(g_app->sync); break;
         }
         return 0;
     case WM_ACTIVATEAPP:

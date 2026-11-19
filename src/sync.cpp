@@ -427,6 +427,115 @@ static DWORD WINAPI SyncThread(LPVOID arg)
 }
 
 // ---------------------------------------------------------------------
+// 实时推送：连着 gopan 的 GET /api/events（gopan doc/39 五），网盘里一有改动就同步，不用干等定时拉取。
+// 后台线程阻塞着读流，收到一条就给主窗口发 WM_APP_REMOTECHANGE（主线程稍等一下合并几条再同步）。
+// 服务端每 5 分钟断一次，断了就重连（正常连过的 3 秒后，连不上的退避到最长 2 分钟）；
+// 老版本的 gopan 不收密钥（401/403/404）：5 分钟后再试，这期间照旧靠定时拉取。
+// 配置变了或停用：代数加一，旧线程读完手上这一段（最多等一次心跳，约 25 秒）就自己退出。
+// ---------------------------------------------------------------------
+static volatile LONG g_liveGen = 0;
+static volatile LONG g_liveConnected = 0;
+struct LiveArgs { Str server, key; LONG gen; };
+
+bool SyncLiveConnected() { return g_liveConnected != 0; }
+
+// 连一次，读到断开为止；返回有没有连上过，*status 是 HTTP 状态（没收到响应为 0）
+static bool LiveOnce(LiveArgs* a, int* statusOut)
+{
+    *statusOut = 0;
+    Str url = a->server;
+    while (url.EndsWith(L"/")) url.Truncate(url.n - 1);
+    url += L"/api/events";
+    URL_COMPONENTSW uc = { sizeof(uc) };
+    wchar_t host[256], path[1024];
+    uc.lpszHostName = host; uc.dwHostNameLength = 256;
+    uc.lpszUrlPath = path; uc.dwUrlPathLength = 1024;
+    if (!WinHttpCrackUrl(url.c(), 0, 0, &uc)) return false;
+    HINTERNET s = WinHttpOpen(L"DeskNote/" APP_VERSION, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) return false;
+    // 读超时要比服务端的心跳（25 秒）长；超时就当断了，重连
+    WinHttpSetTimeouts(s, 20000, 20000, 20000, 60000);
+    HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                         uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+    bool connected = false;
+    if (r)
+    {
+        Str headers = L"Accept: text/event-stream\r\nCache-Control: no-cache\r\nAuthorization: Bearer " + a->key + L"\r\n";
+        if (WinHttpSendRequest(r, headers.c(), (DWORD)headers.n, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr))
+        {
+            DWORD status = 0, len = sizeof(status);
+            WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
+            *statusOut = (int)status;
+            if (status == 200)
+            {
+                connected = true;
+                if (a->gen == g_liveGen) InterlockedExchange(&g_liveConnected, 1);
+                // 刚连上同步一次：断开期间的改动可能漏了
+                PostMessageW(g_app->msgWnd, WM_APP_REMOTECHANGE, 0, 0);
+                const DWORD bufSize = 4096;
+                char* buf = (char*)MemAlloc(bufSize); // 别放栈上：超过 4KB 的局部变量要 C 运行库的栈探测
+                Bytes line;
+                while (a->gen == g_liveGen)
+                {
+                    // 先等到有数据再只读这么多：直接 ReadData 会等到缓冲区读满才返回，推送一条才几十字节
+                    DWORD avail = 0, rd = 0;
+                    if (!WinHttpQueryDataAvailable(r, &avail) || !avail) break;
+                    if (!WinHttpReadData(r, buf, Min(avail, bufSize), &rd) || !rd) break;
+                    for (DWORD i = 0; i < rd; i++)
+                    {
+                        if (buf[i] != '\n') { line.Append(buf + i, 1); continue; }
+                        // 一行：data: 开头的是一条改动；注释（: ping）和空行不管
+                        if (line.n >= 5 && line.p[0] == 'd' && line.p[1] == 'a' && line.p[2] == 't' && line.p[3] == 'a' && line.p[4] == ':')
+                            PostMessageW(g_app->msgWnd, WM_APP_REMOTECHANGE, 0, 0);
+                        line.n = 0;
+                    }
+                }
+                MemFree(buf);
+            }
+        }
+        WinHttpCloseHandle(r);
+    }
+    if (c) WinHttpCloseHandle(c);
+    WinHttpCloseHandle(s);
+    if (a->gen == g_liveGen) InterlockedExchange(&g_liveConnected, 0); // 换了配置的话新线程自己管这个标志
+    return connected;
+}
+
+static DWORD WINAPI LiveThread(LPVOID arg)
+{
+    LiveArgs* a = (LiveArgs*)arg;
+    DWORD backoff = 3000;
+    while (a->gen == g_liveGen)
+    {
+        int status = 0;
+        bool was = LiveOnce(a, &status);
+        if (a->gen != g_liveGen) break;
+        if (was) backoff = 3000;
+        else if (status == 401 || status == 403 || status == 404) backoff = 5 * 60 * 1000;
+        else backoff = Min(backoff * 2, (DWORD)120000);
+        for (DWORD slept = 0; slept < backoff && a->gen == g_liveGen; slept += 500) Sleep(500);
+    }
+    delete a;
+    return 0;
+}
+
+// 按现在的设置（重新）开推送连接；没配好同步就只停掉旧的
+static void LiveRestart(bool configured)
+{
+    LONG gen = InterlockedIncrement(&g_liveGen);
+    InterlockedExchange(&g_liveConnected, 0);
+    if (!configured) return;
+    LiveArgs* a = new LiveArgs();
+    a->server = g_app->settings.syncServer;
+    a->key = g_app->settings.syncKey;
+    a->gen = gen;
+    HANDLE th = CreateThread(nullptr, 0, LiveThread, a, 0, nullptr);
+    if (th) CloseHandle(th);
+    else delete a;
+}
+
+// ---------------------------------------------------------------------
 // 同步器（界面线程）
 // ---------------------------------------------------------------------
 class Syncer
@@ -461,9 +570,10 @@ Syncer* SyncCreate()
 void SyncStart(Syncer* s)
 {
     s->nextPeriodic = 0;
+    LiveRestart(s->Configured());
     if (!s->Configured()) { s->SetStatus(g_app->settings.syncEnabled ? Str(L"还没填服务器地址或密钥") : Str(L"未启用"), false); return; }
     s->debounceAt = GetTickCount() + 1000;
-    s->nextPeriodic = GetTickCount() + 5 * 60 * 1000; // 定时拉一次别的电脑的改动（gopan 每次调用都记审计日志，别太勤）
+    s->nextPeriodic = GetTickCount() + 5 * 60 * 1000; // 定时拉一次别的电脑的改动（连上实时推送后放慢到 30 分钟，只当兜底）
 }
 
 // 便签存过盘：内容跟上次同步时不一样才安排同步（只是挪了位置不算），几秒内的连续改动只同步一次
@@ -481,7 +591,7 @@ void SyncTouch(Syncer* s)
         if (!k || k->local != Sha256Hex(w->d->ContentJson())) changed = true;
     }
     for (int i = 0; i < s->state.notes.n && !changed; i++) if (!seen.Contains(s->state.notes[i].id)) changed = true;
-    if (changed) s->debounceAt = GetTickCount() + 4000;
+    if (changed) s->debounceAt = GetTickCount() + 1500;
 }
 
 void SyncTick(Syncer* s)
@@ -489,7 +599,12 @@ void SyncTick(Syncer* s)
     if (!s || !s->Configured()) return;
     DWORD now = GetTickCount();
     if (s->debounceAt && (int)(now - s->debounceAt) >= 0) { s->debounceAt = 0; SyncNow(s); }
-    else if (s->nextPeriodic && (int)(now - s->nextPeriodic) >= 0) { s->nextPeriodic = now + 5 * 60 * 1000; SyncNow(s); }
+    else if (s->nextPeriodic && (int)(now - s->nextPeriodic) >= 0)
+    {
+        // gopan 每次调用都记审计日志：有实时推送时定时拉取只是兜底，放慢
+        s->nextPeriodic = now + (g_liveConnected ? 30 : 5) * 60 * 1000;
+        SyncNow(s);
+    }
 }
 
 void SyncNow(Syncer* s)
@@ -578,7 +693,13 @@ void SyncOnDone(Syncer* s, LPARAM lp)
     if (s->again) { s->again = false; SyncTouch(s); s->debounceAt = GetTickCount() + 500; }
 }
 
-const Str& SyncStatus(Syncer* s) { return s->status; }
+const Str& SyncStatus(Syncer* s)
+{
+    static Str out;
+    out = s->status;
+    if (g_liveConnected && s->Configured() && !s->failed) out += L" · 已连上实时推送";
+    return out;
+}
 bool SyncFailed(Syncer* s) { return s->failed; }
 bool SyncBusy(Syncer* s) { return s->running || s->debounceAt != 0; }
 

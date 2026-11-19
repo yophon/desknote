@@ -4,11 +4,13 @@
 - 路径区分大小写，"/" 是根；write_text_file 要求父目录已存在
 - 覆盖非空文件必须带 base_sha256，不带报 READ_FIRST，对不上报 EDIT_CONFLICT
 - 业务错误以 isError + "CODE: 说明" 返回
+- GET /api/events:实时推送(gopan doc/39 五),密钥连上来只收到 data: {"t":"files"}
 
 用法：python mock_gopan.py <端口> <密钥>
 """
 import hashlib
 import json
+import queue
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +22,12 @@ KEY = sys.argv[2] if len(sys.argv) > 2 else "test-key"
 lock = Lock()
 folders = {"/"}
 files = {}  # path -> {"id", "content"}
+subscribers = set()  # 连着 /api/events 的客户端,每个一个 Queue
+
+
+def notify():
+    for q in list(subscribers):
+        q.put("files")
 
 
 class ToolError(Exception):
@@ -89,6 +97,32 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        if self.path != "/api/events":
+            self.send_response(404); self.end_headers(); return
+        if self.headers.get("Authorization") != "Bearer " + KEY:
+            self.send_response(401); self.end_headers(); return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        q = queue.Queue()
+        subscribers.add(q)
+        try:
+            self.wfile.write(b"retry: 3000\n: ok\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    q.get(timeout=25)
+                    self.wfile.write(b'data: {"t":"files"}\n\n')
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            subscribers.discard(q)
+
     def do_POST(self):
         if self.path != "/mcp":
             self.send_response(404); self.end_headers(); return
@@ -99,6 +133,8 @@ class H(BaseHTTPRequestHandler):
         try:
             with lock:
                 out = call(p["name"], p.get("arguments") or {})
+            if p["name"] in ("write_text_file", "trash_nodes", "create_directories"):
+                notify()
             result = {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}], "structuredContent": out}
         except ToolError as e:
             result = {"content": [{"type": "text", "text": str(e)}], "isError": True}
