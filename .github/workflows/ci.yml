@@ -16,7 +16,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 编译
         shell: cmd
         run: build.cmd "%RUNNER_TEMP%\DeskNote.exe"
@@ -40,6 +40,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 核心测试 + 界面代码编译检查
         run: sh tests/coretest.sh

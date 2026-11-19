@@ -7,5 +7,5 @@ if "%VSDIR%"=="" (echo Visual Studio C++ build tools not found & exit /b 1)
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 set OUT=%TEMP%\desknote-coretest
 if not exist "%OUT%" mkdir "%OUT%"
-cl /nologo /utf-8 /O1 /W3 /wd4244 /wd4267 /DUNICODE /D_UNICODE /I"%~dp0..\src\core" /I"%~dp0..\src\win" /Fo"%OUT%\\" /Fe"%OUT%\coretest.exe" "%~dp0coretest.cpp" "%~dp0..\src\core\*.cpp" "%~dp0..\src\win\plat_win.cpp" bcrypt.lib crypt32.lib winhttp.lib >"%OUT%\build.log" || (type "%OUT%\build.log" & exit /b 1)
+cl /nologo /utf-8 /O1 /W3 /wd4244 /wd4267 /DUNICODE /D_UNICODE /I"%~dp0..\src\core" /I"%~dp0..\src\win" /Fo"%OUT%\\" /Fe"%OUT%\coretest.exe" "%~dp0coretest.cpp" "%~dp0..\src\core\*.cpp" "%~dp0..\src\win\plat_win.cpp" bcrypt.lib crypt32.lib winhttp.lib user32.lib >"%OUT%\build.log" || (type "%OUT%\build.log" & exit /b 1)
 "%OUT%\coretest.exe" "%OUT%"
