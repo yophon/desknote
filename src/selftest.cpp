@@ -242,6 +242,32 @@ static void Phase1(const Str& server, const Str& key)
     Check(L"启动时做了今天的备份", DirExists(PathJoin(Store::BackupsDir, today.c()).c()));
     NoteWin* a = app->notes[0];
 
+    // ---- 拖着挪位置不改大小，拖边框才改（跨缩放不同的屏拖动曾经越拖越大）----
+    {
+        HWND h = a->hwnd;
+        float S = GetDpiForWindow(h) / 96.f;
+        double w0 = a->d->width, h0 = a->d->height;
+        RECT r;
+        GetWindowRect(h, &r);
+        int pw = r.right - r.left, ph = r.bottom - r.top;
+        SendMessageW(h, WM_ENTERSIZEMOVE, 0, 0);
+        // 模拟系统拖动循环按别的像素大小摆窗口（跨屏时会发生）
+        SetWindowPos(h, nullptr, r.left + 30, r.top + 20, pw * 2, ph * 2, SWP_NOZORDER | SWP_NOACTIVATE);
+        SendMessageW(h, WM_EXITSIZEMOVE, 0, 0);
+        Check(L"拖动挪位置不改便签大小", a->d->width == w0 && a->d->height == h0, Num((int)a->d->width));
+        GetWindowRect(h, &r);
+        Check(L"拖动后窗口还是便签的大小", r.right - r.left == pw && r.bottom - r.top == ph, Num(r.right - r.left));
+        SendMessageW(h, WM_ENTERSIZEMOVE, 0, 0);
+        RECT sr = { r.left, r.top, r.left + (int)(400 * S), r.bottom };
+        SendMessageW(h, WM_SIZING, WMSZ_RIGHT, (LPARAM)&sr);
+        SetWindowPos(h, nullptr, 0, 0, (int)(400 * S), ph, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SendMessageW(h, WM_EXITSIZEMOVE, 0, 0);
+        Check(L"拖边框能改宽度", Abs(a->d->width - 400) < 1, Num((int)a->d->width));
+        a->d->width = w0;
+        a->Render();
+        a->SaveLayout();
+    }
+
     // ---- 添加、撤销、重做 ----
     a->TestTypeItem(a->d->items.n, L"第一条");
     a->TestTypeItem(a->d->items.n, L"第二条 https://example.com/a?b=1。");

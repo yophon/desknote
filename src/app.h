@@ -116,7 +116,8 @@ private:
     int hoverBtn = 0, hoverRow = -1;
     bool hover = false;
     int HitToolbar(float xDip, float yDip) const;
-    bool sizing = false;
+    bool sizing = false;      // 在系统的拖动/缩放循环里
+    bool userResizing = false; // 其中真的在拖边框缩放（收到过 WM_SIZING）
     bool menuChanged = false;
     int HitRow(float yDip) const;
     int HitEdge(int x, int y) const;

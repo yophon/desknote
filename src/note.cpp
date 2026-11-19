@@ -1216,14 +1216,10 @@ void NoteWin::BringOnScreen()
 void NoteWin::SaveLayout()
 {
     if (!hwnd) return;
+    // 只存位置。宽高只在用户拖边框缩放时改（WM_SIZE），不从窗口像素反推：
+    // 跨缩放不同的屏拖动时，窗口像素可能还是旧屏的，反推出来会越拖越大
     RECT r;
     GetWindowRect(hwnd, &r);
-    if (!d->collapsed)
-    {
-        float S = Scale();
-        d->width = (r.right - r.left) / S;
-        d->height = (r.bottom - r.top) / S;
-    }
     d->hasPos = true;
     if (capHidden) { d->x = dockedX; d->y = dockedY; }
     else { d->x = r.left; d->y = r.top; }
@@ -1853,18 +1849,33 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
         return 0;
     }
     case WM_WINDOWPOSCHANGING:
+    {
+        WINDOWPOS* wp = (WINDOWPOS*)l;
         if (d->mode == ModeDesktop && !Editing() && !peeking)
         {
             // 置底模式下（非编辑时）始终压在其他窗口下面
-            WINDOWPOS* wp = (WINDOWPOS*)l;
             if (!(wp->flags & SWP_NOZORDER)) wp->hwndInsertAfter = HWND_BOTTOM;
         }
+        if (sizing && !userResizing && !d->collapsed && !(wp->flags & SWP_NOSIZE))
+        {
+            // 只是拖着挪位置：系统想改大小（跨屏时按旧屏的像素摆窗口）就按便签自己的大小来
+            float S = Scale();
+            wp->cx = (int)(d->width * S + 0.5);
+            wp->cy = (int)(d->height * S + 0.5);
+        }
         break;
+    }
     case WM_ENTERSIZEMOVE:
         sizing = true;
+        userResizing = false;
         return 0;
+    case WM_SIZING:
+        userResizing = true;
+        break;
     case WM_EXITSIZEMOVE:
         sizing = false;
+        userResizing = false;
+        if (!d->collapsed) Render(); // 拖到缩放不同的屏上以后，按这块屏重新定大小
         SaveLayout();
         return 0;
     case WM_ACTIVATEAPP:
@@ -1872,8 +1883,8 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
         if (!w && g_app->peeking) g_app->EndPeek();
         break;
     case WM_SIZE:
-        // 只在用户拖边框缩放时跟着改大小（创建窗口、UpdateLayeredWindow 也会触发 WM_SIZE）
-        if (sizing && !d->collapsed)
+        // 只在用户拖边框缩放时跟着改大小（创建窗口、挪位置、UpdateLayeredWindow 也会触发 WM_SIZE）
+        if (sizing && userResizing && !d->collapsed)
         {
             float S = Scale();
             int pw = (int)(d->width * S + 0.5), ph = (int)(d->height * S + 0.5);
