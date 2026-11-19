@@ -1,5 +1,5 @@
 // 程序主体：入口、单实例、托盘、全局快捷键、开机自启、文件监视、提醒、备份、回收站、消息循环
-#include "app.h"
+#include "ui.h"
 #include <shellapi.h>
 #include <commctrl.h>
 
@@ -443,23 +443,26 @@ static void TrayRemove()
     Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
-static void TrayMenu()
+static void TrayMenu(int sx, int sy)
 {
     enum { CShow = 1, CNew, CBring, CTrash, CSettings, CExit };
-    HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, CShow, L"显示所有便签");
-    AppendMenuW(m, MF_STRING, CNew, L"新建便签");
-    AppendMenuW(m, MF_STRING, CBring, L"把便签拉回屏幕");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, CTrash, L"回收站…");
-    AppendMenuW(m, MF_STRING, CSettings, L"设置…");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, CExit, L"退出");
-    POINT p;
-    GetCursorPos(&p);
-    SetForegroundWindow(g_app->msgWnd);
-    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_app->msgWnd, nullptr);
-    DestroyMenu(m);
+    Ui::Menu m;
+    m.Item(CShow, L"显示所有便签", 0xE7C4, g_app->settings.hotkeyEnabled ? g_app->settings.hotkey.c() : nullptr);
+    m.Item(CNew, L"新建便签", 0xE70B);
+    m.Item(CBring, L"把便签拉回屏幕", 0xE7F4);
+    m.Sep();
+    m.Item(CTrash, L"回收站", 0xE7B8);
+    m.Item(CSettings, L"设置", 0xE713);
+    m.Sep();
+    m.Item(CExit, L"退出", 0xE7E8);
+    if (sx == -1 && sy == -1)
+    {
+        POINT p;
+        GetCursorPos(&p);
+        sx = p.x;
+        sy = p.y;
+    }
+    int cmd = Ui::MenuRun(g_app->msgWnd, &m, sx, sy, nullptr, nullptr);
     PostMessageW(g_app->msgWnd, WM_NULL, 0, 0);
     switch (cmd)
     {
@@ -482,7 +485,7 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l)
         switch (LOWORD(l))
         {
         case WM_LBUTTONUP: g_app->TogglePeek(); break;
-        case WM_RBUTTONUP: case WM_CONTEXTMENU: TrayMenu(); break;
+        case WM_RBUTTONUP: case WM_CONTEXTMENU: TrayMenu(-1, -1); break;
         case NIN_BALLOONUSERCLICK:
             if (g_app->balloonNote && g_app->notes.Contains(g_app->balloonNote))
             {
@@ -573,6 +576,7 @@ extern "C" void __stdcall Start()
         else if (a.Eq(L"--sync-server")) syncServer = argv[i + 1];
         else if (a.Eq(L"--sync-key")) syncKey = argv[i + 1];
         else if (a.Eq(L"--memdiag")) memdiag = argv[i + 1];
+        else if (a.Eq(L"--theme")) Ui::ForceTheme = Str(argv[i + 1]).Eq(L"light") ? 1 : 2;
         else if (a.Eq(L"--wait-pid"))
         {
             HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)ParseInt(Str(argv[i + 1]), 0));
@@ -608,6 +612,14 @@ extern "C" void __stdcall Start()
     else if (open.Eq(L"edit") && g_app->notes.n) g_app->notes[0]->BeginEdit(0);            // 调界面用
     else if (open.Eq(L"capsule") && g_app->notes.n) g_app->notes[0]->Collapse();
     else if (open.Eq(L"preview") && g_app->notes.n) g_app->notes[0]->DebugPreview();
+    else if (open.StartsWith(L"menu") && g_app->notes.n) g_app->notes[0]->DebugMenu((int)ParseInt(open.Sub(4), 0));
+    else if (open.Eq(L"traymenu"))
+    {
+        RECT wa;
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+        Ui::MenuDebug = true;
+        TrayMenu(wa.right - 200, wa.bottom - 10);
+    }
     if (!testPhase.Empty()) SelfTestRun(testPhase, testOut, syncServer, syncKey);
     else if (!memdiag.Empty()) MemDiagRun(memdiag);
 
@@ -625,7 +637,7 @@ extern "C" void __stdcall Start()
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
         {
             if (msg.message == WM_QUIT) { quit = true; break; }
-            if (g_app->settingsWnd && IsDialogMessageW(g_app->settingsWnd, &msg)) continue;
+            if (g_app->settingsWnd && !SettingsWindowWantsKeys(g_app->settingsWnd) && IsDialogMessageW(g_app->settingsWnd, &msg)) continue;
             if (g_app->trashWnd && IsDialogMessageW(g_app->trashWnd, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

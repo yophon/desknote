@@ -1,5 +1,6 @@
-// 回收站窗口、设置窗口、提醒对话框、不透明度和字号对话框（都用系统控件）
-#include "app.h"
+// 回收站窗口、提醒对话框（系统控件），设置窗口（自绘）
+#include "ui.h"
+#include <dwmapi.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <windowsx.h>
@@ -347,115 +348,381 @@ void TrashWindowRefresh(HWND w)
 }
 
 // =====================================================================
-// 设置：开机启动、全局快捷键、数据文件夹、同步
+// 设置：仿 Win11 设置页（分组标题 + 卡片 + 开关），整页自绘，只有三个输入框用系统控件
 // =====================================================================
-enum { IdAuto = 20, IdHkEnable, IdHotkey, IdOpenDir, IdOpenBackup, IdSyncEnable, IdServer, IdKey, IdFolder, IdSyncNow, IdSetClose };
-struct SettingsDlg : DlgBase
+enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave };
+struct HitArea { int id; D2D1_RECT_F r; };
+
+static void ApplyFrameTheme(HWND h)
 {
-    HWND hkEnable, hotkey, hkStatus, syncEnable, server, key, folder, syncStatus;
-    void Build()
+    BOOL dark = Ui::T.dark;
+    DwmSetWindowAttribute(h, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    COLORREF cap = Ui::Ref(Ui::T.winBg);
+    DwmSetWindowAttribute(h, 35 /* DWMWA_CAPTION_COLOR：标题栏和内容同色 */, &cap, sizeof(cap));
+}
+
+struct SettingsWin
+{
+    static const int Width = 600;
+    HWND hwnd = nullptr;
+    int dpi = 96;
+    float S() const { return dpi / 96.f; }
+    HWND edits[3] = {};               // 服务器、密钥、文件夹
+    D2D1_RECT_F frames[3] = {};       // 输入框外框（DIP，内容坐标）
+    HFONT editFont = nullptr;
+    int editH = 0;
+    HBRUSH brushRest = nullptr, brushFocus = nullptr;
+    Vec<HitArea> hits;
+    int hover = SNone, press = SNone;
+    bool tracking = false;
+    float scroll = 0, contentH = 0;
+    bool recording = false;
+    UINT recMods = 0;
+    Str hkMsg;                        // 快捷键出错时的提示
+
+    void Invalidate() { InvalidateRect(hwnd, nullptr, FALSE); }
+
+    void MakeBrushes()
+    {
+        if (brushRest) DeleteObject(brushRest);
+        if (brushFocus) DeleteObject(brushFocus);
+        brushRest = CreateSolidBrush(Ui::Ref(Ui::T.inputBg));
+        brushFocus = CreateSolidBrush(Ui::Ref(Ui::T.inputFocusBg));
+    }
+
+    void MakeFont()
+    {
+        if (editFont) DeleteObject(editFont);
+        editFont = CreateFontW(-(int)(14 * S() + 0.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
+        HDC dc = GetDC(hwnd);
+        HGDIOBJ of = SelectObject(dc, editFont);
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        editH = tm.tmHeight;
+        SelectObject(dc, of);
+        ReleaseDC(hwnd, dc);
+        for (int i = 0; i < 3; i++) if (edits[i]) SendMessageW(edits[i], WM_SETFONT, (WPARAM)editFont, TRUE);
+    }
+
+    void KeyCue()
+    {
+        SendMessageW(edits[1], EM_SETCUEBANNER, TRUE, (LPARAM)(g_app->settings.syncKey.n ? L"已保存（不改就留空）" : L"粘贴 gopan 的密钥"));
+    }
+
+    void Init()
     {
         Settings& s = g_app->settings;
-        const int W = 470, X = 20, CW = W - 40;
-        int y = 14;
-        auto section = [&](const wchar_t* t) {
-            HWND c = Add(L"STATIC", t, SS_LEFT, X, y, CW, 22, 0);
-            MakeBold(c);
-            y += 26;
-            return c;
-        };
-        auto hint = [&](const wchar_t* t) {
-            int h = TextHeightDip(t, CW);
-            Hint(t, X, y, CW, h);
-            y += h + 6;
-        };
-        section(L"启动");
-        HWND autoBox = Add(L"BUTTON", g_app->isDefaultDir ? L"开机自动启动" : L"开机自动启动（测试数据目录下不可用）",
-                           WS_TABSTOP | BS_AUTOCHECKBOX, X, y, CW, 24, IdAuto);
-        Button_SetCheck(autoBox, App::IsAutoStart() ? BST_CHECKED : BST_UNCHECKED);
-        if (!g_app->isDefaultDir) EnableWindow(autoBox, FALSE);
-        y += 26;
-        hint(L"移动 exe 后，打开一次新位置的 exe，开机启动会自动改到新位置。");
-        y += 6;
-
-        section(L"全局快捷键");
-        hkEnable = Add(L"BUTTON", L"启用", WS_TABSTOP | BS_AUTOCHECKBOX, X, y, CW, 24, IdHkEnable);
-        Button_SetCheck(hkEnable, s.hotkeyEnabled ? BST_CHECKED : BST_UNCHECKED);
-        y += 28;
-        hotkey = Add(HOTKEY_CLASSW, L"", WS_TABSTOP | WS_BORDER, X, y, 200, 26, IdHotkey);
-        UINT mods, vk;
-        if (HotkeyParse(s.hotkey, &mods, &vk))
+        MakeBrushes();
+        const wchar_t* init[3] = { s.syncServer.c(), L"", s.syncFolder.c() };
+        for (int i = 0; i < 3; i++)
         {
-            WORD f = (mods & MOD_CONTROL ? HOTKEYF_CONTROL : 0) | (mods & MOD_ALT ? HOTKEYF_ALT : 0) | (mods & MOD_SHIFT ? HOTKEYF_SHIFT : 0);
-            SendMessageW(hotkey, HKM_SETHOTKEY, MAKEWORD(vk, f), 0);
+            edits[i] = CreateWindowExW(0, L"EDIT", init[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | (i == 1 ? ES_PASSWORD : 0),
+                                       0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)(100 + i), g_inst, nullptr);
+            Ui::AllowDarkControls(edits[i]);
         }
-        SendMessageW(hotkey, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
-        SetWindowSubclass(hotkey, HotkeySub, 1, (DWORD_PTR)this);
-        EnableWindow(hotkey, s.hotkeyEnabled);
-        y += 30;
-        hkStatus = Add(L"STATIC", L"", SS_LEFT, X, y, CW, 22, 0);
-        status = hkStatus;
-        y += 24;
-        hint(L"点输入框后按下新的组合键。按快捷键或单击托盘图标，会把所有便签临时提到最前面；再按一次或点别处恢复。");
-        y += 6;
+        MakeFont();
+        SendMessageW(edits[0], EM_SETCUEBANNER, TRUE, (LPARAM)L"https://");
+        SendMessageW(edits[2], EM_SETCUEBANNER, TRUE, (LPARAM)L"DeskNote");
+        KeyCue();
+        const wchar_t* e = g_app->ApplyHotkey();
+        hkMsg = e ? e : L"";
+    }
 
-        section(L"数据");
-        Add(L"EDIT", Store::Dir.c(), ES_READONLY | ES_AUTOHSCROLL, X, y + 3, CW - 100, 24, 0);
-        Add(L"BUTTON", L"打开", WS_TABSTOP | BS_PUSHBUTTON, X + CW - 90, y, 90, 28, IdOpenDir);
-        y += 32;
-        hint(L"每张便签一个 json 文件，在 notes 文件夹里；回收站是 trash.json。");
+    // ---- 画控件 ----
+    void Toggle(ID2D1RenderTarget* rt, int id, bool on, bool enabled, float right, float cy)
+    {
+        D2D1_RECT_F tr = D2D1::RectF(right - 40, cy - 10, right, cy + 10);
+        if (enabled) { HitArea a = { id, D2D1::RectF(tr.left - 44, cy - 16, tr.right, cy + 16) }; hits.Push(a); }
+        if (!rt) return;
+        const Ui::Theme& T = Ui::T;
+        bool hot = enabled && hover == id, down = enabled && press == id;
+        Ui::Text(rt, Str(on ? L"开" : L"关"), D2D1::RectF(tr.left - 44, cy - 12, tr.left - 12, cy + 12), 14, 400, enabled ? T.text : T.disabled, Ui::Right);
+        float kr = down ? 7.f : hot ? 7.f : 6.f;
+        if (on)
+        {
+            Ui::Fill(rt, tr, 10, enabled ? (hot ? (T.accent & 0x00FFFFFF) | 0xE6000000 : T.accent) : T.disabled);
+            Ui::Circle(rt, tr.right - 10 - (down ? 2.f : 0.f), cy, kr, T.onAccent);
+        }
+        else
+        {
+            Ui::Fill(rt, tr, 10, hot ? T.subtleHover : T.toggleOffFill);
+            Ui::Stroke(rt, tr, 10, enabled ? T.strong : T.disabled, 1);
+            Ui::Circle(rt, tr.left + 10 + (down ? 2.f : 0.f), cy, kr, enabled ? T.text2 : T.disabled);
+        }
+    }
+
+    float Button(ID2D1RenderTarget* rt, int id, const wchar_t* text, float right, float cy, bool accent)
+    {
+        Str t(text);
+        float w = Max(88.f, Ui::Measure(t, 14, 400) + 24);
+        D2D1_RECT_F r = D2D1::RectF(right - w, cy - 16, right, cy + 16);
+        HitArea a = { id, r };
+        hits.Push(a);
+        if (!rt) return w;
+        const Ui::Theme& T = Ui::T;
+        bool hot = hover == id, down = press == id;
+        if (accent)
+        {
+            Ui::Fill(rt, r, 4, down ? (T.accent & 0x00FFFFFF) | 0xCC000000 : hot ? (T.accent & 0x00FFFFFF) | 0xE6000000 : T.accent);
+            Ui::Text(rt, t, r, 14, 400, down ? (T.onAccent & 0x00FFFFFF) | 0x80000000 : T.onAccent, Ui::Center);
+        }
+        else
+        {
+            Ui::Fill(rt, r, 4, Ui::Solid(down ? T.ctrlPress : hot ? T.ctrlHover : T.ctrlFill, T.cardBg));
+            Ui::Stroke(rt, r, 4, T.ctrlBorder, 1);
+            if (!T.dark) Ui::Line(rt, r.left + 4, r.bottom - 0.5f, r.right - 4, r.bottom - 0.5f, T.ctrlBorderBottom, 1);
+            Ui::Text(rt, t, r, 14, 400, down ? T.text2 : T.text, Ui::Center);
+        }
+        return w;
+    }
+
+    // 快捷键：一组按键帽 + 编辑按钮；返回占的宽度
+    float HotkeyKeys(ID2D1RenderTarget* rt, float right, float cy, bool enabled)
+    {
+        const Ui::Theme& T = Ui::T;
+        Vec<Str> keys;
+        if (recording)
+        {
+            if (recMods & MOD_CONTROL) keys.Push(Str(L"Ctrl"));
+            if (recMods & MOD_ALT) keys.Push(Str(L"Alt"));
+            if (recMods & MOD_SHIFT) keys.Push(Str(L"Shift"));
+            if (recMods & MOD_WIN) keys.Push(Str(L"Win"));
+        }
+        else
+        {
+            const Str& hk = g_app->settings.hotkey;
+            int start = 0;
+            for (int i = 0; i <= hk.n; i++)
+                if (i == hk.n || hk.p[i] == L'+') { Str k = hk.Sub(start, i - start).Trim(); if (k.n) keys.Push(k); start = i + 1; }
+        }
+        float x = right;
+        // 编辑按钮
+        D2D1_RECT_F pen = D2D1::RectF(x - 32, cy - 16, x, cy + 16);
+        x -= 32 + 6;
+        float widths[8];
+        int n = Min(keys.n, 8);
+        float total = 0;
+        for (int i = 0; i < n; i++) { widths[i] = Max(30.f, Ui::Measure(keys[i], 12, 600) + 18); total += widths[i] + (i ? 4 : 0); }
+        Str waiting(L"请按组合键");
+        if (recording && !n) total = Ui::Measure(waiting, 12, 400) + 24;
+        float left = x - total;
+        if (enabled) { HitArea a = { SHkKeys, D2D1::RectF(left - 4, cy - 18, right, cy + 18) }; hits.Push(a); }
+        if (rt)
+        {
+            bool hot = enabled && hover == SHkKeys;
+            if (hot || recording) Ui::Fill(rt, pen, 4, recording ? T.subtlePress : T.subtleHover);
+            Ui::Icon(rt, 0xE70F, (pen.left + pen.right) / 2, cy, 14, enabled ? T.text2 : T.disabled);
+            if (recording && !n)
+            {
+                D2D1_RECT_F r = D2D1::RectF(left, cy - 15, x, cy + 15);
+                Ui::Stroke(rt, r, 4, T.accent, 1.5f);
+                Ui::Text(rt, waiting, r, 12, 400, T.accent, Ui::Center);
+            }
+            float kx = left;
+            for (int i = 0; i < n; i++)
+            {
+                D2D1_RECT_F r = D2D1::RectF(kx, cy - 15, kx + widths[i], cy + 15);
+                if (enabled) Ui::Fill(rt, r, 4, T.accent);
+                else { Ui::Fill(rt, r, 4, T.ctrlFill); Ui::Stroke(rt, r, 4, T.ctrlBorder, 1); }
+                Ui::Text(rt, keys[i], r, 12, 600, enabled ? T.onAccent : T.disabled, Ui::Center);
+                kx += widths[i] + 4;
+            }
+        }
+        return right - left;
+    }
+
+    // 卡片：左边图标，标题 + 说明，右边留 rightW 给控件；below = 下面接着的展开区高度
+    D2D1_RECT_F Card(ID2D1RenderTarget* rt, float& y, wchar_t icon, const Str& title, const Str& desc, u32 descColor, float rightW, bool wrapDesc, float below)
+    {
+        const float L = 24, R = Width - 24;
+        float textL = L + 16 + 20 + 16, textR = R - 16 - (rightW > 0 ? rightW + 16 : 0);
+        float descH = desc.n ? (wrapDesc ? Ui::MeasureWrap(desc, textR - textL, 12, 400) : 17) : 0;
+        float block = 20 + descH;
+        float h = Max(68.f, block + 30);
+        D2D1_RECT_F r = D2D1::RectF(L, y, R, y + h);
+        if (rt)
+        {
+            const Ui::Theme& T = Ui::T;
+            D2D1_RECT_F all = D2D1::RectF(L, y, R, y + h + below);
+            Ui::Fill(rt, all, 4, T.cardBg);
+            Ui::Stroke(rt, all, 4, T.cardBorder, 1);
+            Ui::Icon(rt, icon, L + 16 + 10, y + h / 2, 20, T.text);
+            float ty = y + (h - block) / 2;
+            Ui::Text(rt, title, D2D1::RectF(textL, ty, textR, ty + 20), 14, 400, T.text);
+            if (desc.n)
+            {
+                if (wrapDesc) Ui::TextWrap(rt, desc, textL, ty + 20, textR - textL, 12, 400, descColor);
+                else Ui::Text(rt, desc, D2D1::RectF(textL, ty + 20, textR, ty + 20 + descH), 12, 400, descColor);
+            }
+        }
+        y += h;
+        return r;
+    }
+
+    void Section(ID2D1RenderTarget* rt, float& y, const wchar_t* t, bool first)
+    {
+        if (!first) y += 24;
+        if (rt) Ui::Text(rt, Str(t), D2D1::RectF(24, y, Width - 24, y + 20), 14, 600, Ui::T.text);
+        y += 20 + 8;
+    }
+
+    // 布局并（rt 不为空时）绘制；同时记下可点区域和输入框位置
+    void Build(ID2D1RenderTarget* rt)
+    {
+        hits.Clear();
+        const Ui::Theme& T = Ui::T;
+        Settings& s = g_app->settings;
+        const float L = 24, R = Width - 24;
+        float y = 16;
+
+        Section(rt, y, L"常规", true);
+        D2D1_RECT_F c = Card(rt, y, 0xE7E8, Str(L"开机自动启动"),
+                             Str(g_app->isDefaultDir ? L"移动 exe 后，打开一次新位置的 exe，自启会跟着改过去" : L"用测试数据目录打开时不可用"),
+                             T.text2, 84, true, 0);
+        Toggle(rt, SAuto, App::IsAutoStart(), g_app->isDefaultDir, R - 16, (c.top + c.bottom) / 2);
+        y += 4;
+        {
+            Str desc;
+            u32 dc = T.text2;
+            if (hkMsg.n) { desc = hkMsg; dc = T.critical; }
+            else if (recording) { desc = L"按下新的组合键（要带 Ctrl 或 Alt），Esc 取消"; dc = T.accent; }
+            else desc = L"临时把所有便签提到最前面，再按一次恢复";
+            // 右边控件的宽度要先量出来
+            int keep = hits.n;
+            float keysW = HotkeyKeys(nullptr, 0, 0, s.hotkeyEnabled);
+            while (hits.n > keep) hits.RemoveAt(hits.n - 1);
+            c = Card(rt, y, 0xE765, Str(L"全局快捷键"), desc, dc, 84 + 20 + keysW, true, 0);
+            float cy = (c.top + c.bottom) / 2;
+            Toggle(rt, SHkToggle, s.hotkeyEnabled, true, R - 16, cy);
+            HotkeyKeys(rt, R - 16 - 84 - 20, cy, s.hotkeyEnabled);
+        }
+
+        Section(rt, y, L"数据", false);
+        Str openW(L"打开");
+        float bw = Max(88.f, Ui::Measure(openW, 14, 400) + 24);
+        c = Card(rt, y, 0xE8B7, Str(L"数据文件夹"), Store::Dir, T.text2, bw, false, 0);
+        Button(rt, SOpenDir, L"打开", R - 16, (c.top + c.bottom) / 2, false);
+        y += 4;
         Str bh(L"每天自动备份一次，保留最近 ");
-        bh.Int(Store::KeepBackups).Append(L" 天。要找回某天的内容，把备份里的文件复制回 notes 文件夹即可。");
-        int bhh = TextHeightDip(bh.c(), CW - 100);
-        Hint(bh.c(), X, y, CW - 100, bhh);
-        Add(L"BUTTON", L"打开备份", WS_TABSTOP | BS_PUSHBUTTON, X + CW - 90, y, 90, 28, IdOpenBackup);
-        y += Max(bhh, 30) + 12;
+        bh.Int(Store::KeepBackups).Append(L" 天。要找回某天的内容，把备份里的文件复制回 notes 文件夹");
+        c = Card(rt, y, 0xE81C, Str(L"每日备份"), bh, T.text2, bw, true, 0);
+        Button(rt, SOpenBackup, L"打开", R - 16, (c.top + c.bottom) / 2, false);
 
-        section(L"同步到 gopan");
-        syncEnable = Add(L"BUTTON", L"启用同步（多台电脑共用这些便签）", WS_TABSTOP | BS_AUTOCHECKBOX, X, y, CW, 24, IdSyncEnable);
-        Button_SetCheck(syncEnable, s.syncEnabled ? BST_CHECKED : BST_UNCHECKED);
-        y += 30;
-        Add(L"STATIC", L"服务器", SS_LEFT, X, y + 4, 56, 22, 0);
-        server = Add(L"EDIT", s.syncServer.c(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, X + 60, y, CW - 60, 26, IdServer);
-        y += 32;
-        Add(L"STATIC", L"密钥", SS_LEFT, X, y + 4, 56, 22, 0);
-        key = Add(L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD, X + 60, y, CW - 60, 26, IdKey);
-        if (s.syncKey.n) SendMessageW(key, EM_SETCUEBANNER, TRUE, (LPARAM)L"已保存（不改就留空）");
-        y += 32;
-        Add(L"STATIC", L"文件夹", SS_LEFT, X, y + 4, 56, 22, 0);
-        folder = Add(L"EDIT", s.syncFolder.c(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, X + 60, y, CW - 60, 26, IdFolder);
-        y += 34;
-        Add(L"BUTTON", L"保存并立即同步", WS_TABSTOP | BS_PUSHBUTTON, X, y, 130, 28, IdSyncNow);
-        y += 34;
-        syncStatus = Hint(L"", X, y, CW, 22);
-        y += 26;
-        hint(L"在 gopan 网页的「Agent 接入」里新建一把密钥，权限勾选：浏览与搜索、读取与下载内容、新建重命名移动与复制、移入回收站与恢复。"
-             L"每张便签存成文件夹里的一个 json；只同步内容和外观，窗口位置、回收站各台电脑自己管。"
-             L"两台电脑同时改了同一张便签时，本地那份会另存成一张「冲突副本」，不会丢。");
+        Section(rt, y, L"同步", false);
+        const float textL = L + 16 + 20 + 16;
+        Str help(L"密钥在 gopan 网页的「Agent 接入」里新建，权限勾选：浏览与搜索、读取与下载内容、新建重命名移动与复制、移入回收站与恢复。"
+                 L"只同步内容和外观，窗口位置、回收站各台电脑自己管；两台电脑同时改了同一张便签时，本地那份另存成「冲突副本」，不会丢。");
+        float helpH = Ui::MeasureWrap(help, R - 16 - textL, 12, 400);
+        float below = 8 + 3 * 44 + 6 + helpH + 14 + 32 + 18;
+        Str status = SyncStatus(g_app->sync);
+        if (!status.n) status = L"多台电脑共用这些便签";
+        c = Card(rt, y, 0xE753, Str(L"同步到 gopan"), status, SyncFailed(g_app->sync) ? T.critical : T.text2, 84, false, below);
+        Toggle(rt, SSyncToggle, s.syncEnabled, true, R - 16, (c.top + c.bottom) / 2);
+        if (rt)
+        {
+            Ui::FillCorners(rt, D2D1::RectF(L + 1, y, R - 1, y + below - 1), 0, 0, 3, 3, T.cardBg2);
+            Ui::Line(rt, L + 1, y + 0.5f, R - 1, y + 0.5f, T.cardBorder, 1);
+        }
         y += 8;
-        Str ver(L"DeskNote " APP_VERSION L"（原生版）· 编译于 ");
+        const wchar_t* labels[3] = { L"服务器", L"密钥", L"文件夹" };
+        for (int i = 0; i < 3; i++)
+        {
+            float cy = y + 22;
+            frames[i] = D2D1::RectF(R - 16 - 340, cy - 16, R - 16, cy + 16);
+            if (rt)
+            {
+                Ui::Text(rt, Str(labels[i]), D2D1::RectF(textL, cy - 12, frames[i].left - 12, cy + 12), 14, 400, T.text);
+                bool f = GetFocus() == edits[i];
+                D2D1_RECT_F fr = frames[i];
+                Ui::Fill(rt, fr, 4, f ? T.inputFocusBg : T.inputBg);
+                Ui::Stroke(rt, fr, 4, T.ctrlBorder, 1);
+                if (f) Ui::Fill(rt, D2D1::RectF(fr.left + 1, fr.bottom - 2, fr.right - 1, fr.bottom), 1, T.accent);
+                else Ui::Line(rt, fr.left + 3, fr.bottom - 0.5f, fr.right - 3, fr.bottom - 0.5f, T.strong, 1);
+            }
+            y += 44;
+        }
+        y += 6;
+        if (rt) Ui::TextWrap(rt, help, textL, y, R - 16 - textL, 12, 400, T.text2);
+        y += helpH + 14;
+        Button(rt, SSyncSave, L"保存并立即同步", R - 16, y + 16, true);
+        y += 32 + 18;
+
+        y += 20;
+        Str ver(L"DeskNote " APP_VERSION L" · 原生版 · 编译于 ");
         const char* date = __DATE__ " " __TIME__;
-        ver += FromUtf8(date, (int)strlen_(date));
-        Hint(ver.c(), X, y + 6, CW - 100, 22);
-        Add(L"BUTTON", L"关闭", WS_TABSTOP | BS_PUSHBUTTON, X + CW - 90, y, 90, 28, IdSetClose);
-        y += 44;
-        SizeClient(W, y);
-        ShowHotkeyStatus(g_app->ApplyHotkey());
-        RefreshSync();
+        int dn = 0;
+        while (date[dn]) dn++;
+        ver += FromUtf8(date, dn);
+        if (rt) Ui::Text(rt, ver, D2D1::RectF(L, y, R, y + 17), 12, 400, T.text3);
+        y += 17 + 24;
+        contentH = y;
     }
-    static int strlen_(const char* s) { int n = 0; while (s[n]) n++; return n; }
-    void ShowHotkeyStatus(const wchar_t* err)
+
+    float ClientHDip()
     {
-        if (!g_app->settings.hotkeyEnabled) { statusColor = RGB(0x77, 0x77, 0x77); SetWindowTextW(hkStatus, L"已停用"); }
-        else if (err) { statusColor = RGB(0xCD, 0x5C, 0x5C); SetWindowTextW(hkStatus, err); }
-        else { statusColor = RGB(0x2E, 0x8B, 0x57); SetWindowTextW(hkStatus, (L"已生效：" + g_app->settings.hotkey).c()); }
-        InvalidateRect(hkStatus, nullptr, TRUE);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        return rc.bottom / S();
     }
-    void RefreshSync()
+
+    void ClampScroll() { scroll = Clamp(scroll, 0.f, Max(0.f, contentH - ClientHDip())); }
+
+    void PlaceEdits()
     {
-        SetWindowTextW(syncStatus, SyncStatus(g_app->sync).c());
-        InvalidateRect(syncStatus, nullptr, TRUE);
+        float s = S();
+        for (int i = 0; i < 3; i++)
+        {
+            D2D1_RECT_F f = frames[i];
+            int x = (int)((f.left + 11) * s), w = (int)((f.right - 11) * s) - x;
+            int cy = (int)(((f.top + f.bottom) / 2 - scroll) * s);
+            RECT cur;
+            GetWindowRect(edits[i], &cur);
+            MapWindowPoints(nullptr, hwnd, (POINT*)&cur, 2);
+            if (cur.left != x || cur.top != cy - editH / 2 || cur.right - cur.left != w || cur.bottom - cur.top != editH)
+                MoveWindow(edits[i], x, cy - editH / 2, w, editH, TRUE);
+        }
     }
+
+    void Paint()
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        Canvas c;
+        if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
+        {
+            ID2D1RenderTarget* rt = c.rt;
+            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
+            rt->Clear(&bg);
+            rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -scroll));
+            Build(rt);
+            rt->SetTransform(D2D1::Matrix3x2F::Identity());
+            float viewH = rc.bottom / S();
+            if (contentH > viewH + 1)
+            {
+                // 细滚动条：只是位置指示，用滚轮滚
+                float th = Max(24.f, viewH * viewH / contentH);
+                float ty = (viewH - th) * scroll / (contentH - viewH);
+                Ui::Fill(rt, D2D1::RectF(Width - 7, ty + 2, Width - 4, ty + th - 2), 1.5f, Ui::T.text3);
+            }
+        }
+        c.EndBlt(dc);
+        EndPaint(hwnd, &ps);
+        PlaceEdits();
+    }
+
+    int HitAt(int px, int py)
+    {
+        float x = px / S(), y = py / S() + scroll;
+        for (int i = hits.n - 1; i >= 0; i--)
+        {
+            const D2D1_RECT_F& r = hits[i].r;
+            if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return hits[i].id;
+        }
+        return SNone;
+    }
+
     static Str GetText(HWND h)
     {
         int len = GetWindowTextLengthW(h);
@@ -465,100 +732,235 @@ struct SettingsDlg : DlgBase
         s.n = WLen(s.p);
         return s;
     }
-    // 录快捷键时先停用当前快捷键，否则按下去会被系统直接截走
-    static LRESULT CALLBACK HotkeySub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR ref)
+
+    void SaveSync()
     {
-        SettingsDlg* self = (SettingsDlg*)ref;
-        if (m == WM_SETFOCUS)
-        {
-            UnregisterHotKey(g_app->msgWnd, 1);
-            self->statusColor = RGB(0x77, 0x77, 0x77);
-            SetWindowTextW(self->hkStatus, L"请按下新的组合键…");
-        }
-        else if (m == WM_KILLFOCUS) self->ShowHotkeyStatus(g_app->ApplyHotkey());
-        return DefSubclassProc(h, m, w, l);
+        Settings& s = g_app->settings;
+        Str sv = GetText(edits[0]).Trim();
+        while (sv.EndsWith(L"/")) sv.Truncate(sv.n - 1);
+        if (sv.n && !sv.StartsWith(L"http")) sv = L"https://" + sv;
+        s.syncServer = sv;
+        SetWindowTextW(edits[0], sv.c());
+        s.syncFolder = SyncNormFolder(GetText(edits[2]));
+        SetWindowTextW(edits[2], s.syncFolder.c());
+        Str k = GetText(edits[1]).Trim();
+        if (k.n) { s.syncKey = k; SetWindowTextW(edits[1], L""); }
+        KeyCue();
+        Store::SaveSettings(s);
+        SyncStart(g_app->sync);
+        SyncNow(g_app->sync);
+        Invalidate();
     }
-    void OnHotkeyChanged()
+
+    // ---- 录快捷键 ----
+    static UINT CurMods()
     {
-        LRESULT v = SendMessageW(hotkey, HKM_GETHOTKEY, 0, 0);
-        UINT vk = LOBYTE(LOWORD(v)), f = HIBYTE(LOWORD(v));
-        UINT mods = (f & HOTKEYF_CONTROL ? MOD_CONTROL : 0) | (f & HOTKEYF_ALT ? MOD_ALT : 0) | (f & HOTKEYF_SHIFT ? MOD_SHIFT : 0);
-        if (!vk || !(mods & (MOD_CONTROL | MOD_ALT)))
+        UINT m = 0;
+        if (GetKeyState(VK_CONTROL) < 0) m |= MOD_CONTROL;
+        if (GetKeyState(VK_MENU) < 0) m |= MOD_ALT;
+        if (GetKeyState(VK_SHIFT) < 0) m |= MOD_SHIFT;
+        if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0) m |= MOD_WIN;
+        return m;
+    }
+    void StartRecording()
+    {
+        recording = true;
+        recMods = 0;
+        hkMsg = L"";
+        UnregisterHotKey(g_app->msgWnd, 1); // 否则按下去会被系统直接截走
+        SetFocus(hwnd);
+        Invalidate();
+    }
+    void StopRecording()
+    {
+        if (!recording) return;
+        recording = false;
+        const wchar_t* e = g_app->ApplyHotkey();
+        hkMsg = e ? e : L"";
+        Invalidate();
+    }
+    void OnRecordKey(UINT vk)
+    {
+        if (vk == VK_ESCAPE) { StopRecording(); return; }
+        UINT mods = CurMods();
+        if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT || vk == VK_LWIN || vk == VK_RWIN ||
+            vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LSHIFT || vk == VK_RSHIFT)
         {
-            statusColor = RGB(0xCD, 0x5C, 0x5C);
-            SetWindowTextW(hkStatus, L"要配合 Ctrl 或 Alt 一起按");
-            InvalidateRect(hkStatus, nullptr, TRUE);
+            recMods = mods;
+            Invalidate();
+            return;
+        }
+        bool valid = (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9') || (vk >= VK_F1 && vk <= VK_F24) || vk == VK_SPACE;
+        if (!valid || !(mods & (MOD_CONTROL | MOD_ALT)))
+        {
+            recMods = mods;
+            hkMsg = L"要带 Ctrl 或 Alt，再加一个字母、数字或 F 键";
+            Invalidate();
             return;
         }
         g_app->settings.hotkey = HotkeyFormat(mods, vk);
         Store::SaveSettings(g_app->settings);
-        statusColor = RGB(0x77, 0x77, 0x77);
-        SetWindowTextW(hkStatus, (L"已记录：" + g_app->settings.hotkey + L"，点别处后生效").c());
-        InvalidateRect(hkStatus, nullptr, TRUE);
+        StopRecording();
     }
-    void SaveSync()
+
+    void Activate(int id)
     {
         Settings& s = g_app->settings;
-        s.syncEnabled = Button_GetCheck(syncEnable) == BST_CHECKED;
-        Str sv = GetText(server).Trim();
-        while (sv.EndsWith(L"/")) sv.Truncate(sv.n - 1);
-        if (sv.n && !sv.StartsWith(L"http")) sv = L"https://" + sv;
-        s.syncServer = sv;
-        SetWindowTextW(server, sv.c());
-        s.syncFolder = SyncNormFolder(GetText(folder));
-        SetWindowTextW(folder, s.syncFolder.c());
-        Str k = GetText(key).Trim();
-        if (k.n) { s.syncKey = k; SetWindowTextW(key, L""); SendMessageW(key, EM_SETCUEBANNER, TRUE, (LPARAM)L"已保存（不改就留空）"); }
-        Store::SaveSettings(s);
-        SyncStart(g_app->sync);
-        SyncNow(g_app->sync);
-        RefreshSync();
+        switch (id)
+        {
+        case SAuto: if (g_app->isDefaultDir) App::SetAutoStart(!App::IsAutoStart()); break;
+        case SHkToggle:
+        {
+            recording = false;
+            s.hotkeyEnabled = !s.hotkeyEnabled;
+            Store::SaveSettings(s);
+            const wchar_t* e = g_app->ApplyHotkey();
+            hkMsg = e ? e : L"";
+            break;
+        }
+        case SHkKeys: if (recording) StopRecording(); else StartRecording(); break;
+        case SOpenDir: ShellExecuteW(nullptr, L"open", L"explorer.exe", Store::Dir.c(), nullptr, SW_SHOWNORMAL); break;
+        case SOpenBackup:
+            EnsureDir(Store::BackupsDir.c());
+            ShellExecuteW(nullptr, L"open", L"explorer.exe", Store::BackupsDir.c(), nullptr, SW_SHOWNORMAL);
+            break;
+        case SSyncToggle: s.syncEnabled = !s.syncEnabled; SaveSync(); break;
+        case SSyncSave: SaveSync(); break;
+        }
+        Invalidate();
     }
+
+    void ApplyTheme()
+    {
+        Ui::LoadTheme();
+        MakeBrushes();
+        ApplyFrameTheme(hwnd);
+        for (int i = 0; i < 3; i++) { Ui::AllowDarkControls(edits[i]); InvalidateRect(edits[i], nullptr, TRUE); }
+        Invalidate();
+    }
+
     static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
     {
-        SettingsDlg* self = (SettingsDlg*)GetWindowLongPtrW(h, GWLP_USERDATA);
+        SettingsWin* self = (SettingsWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
         if (m == WM_NCCREATE)
         {
-            self = (SettingsDlg*)((CREATESTRUCTW*)l)->lpCreateParams;
+            self = (SettingsWin*)((CREATESTRUCTW*)l)->lpCreateParams;
             self->hwnd = h;
             SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
         }
         if (!self) return DefWindowProcW(h, m, w, l);
-        LRESULT r;
-        if (m == WM_CTLCOLORSTATIC && (HWND)l == self->syncStatus)
-        {
-            SetBkMode((HDC)w, TRANSPARENT);
-            SetTextColor((HDC)w, SyncFailed(g_app->sync) ? RGB(0xCD, 0x5C, 0x5C) : RGB(0x77, 0x77, 0x77));
-            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
-        }
-        if (self->Common(m, w, l, &r)) return r;
         switch (m)
         {
-        case WM_COMMAND:
-            switch (LOWORD(w))
+        case WM_PAINT: self->Paint(); return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_CTLCOLOREDIT:
+        {
+            bool f = GetFocus() == (HWND)l;
+            u32 bg = f ? Ui::T.inputFocusBg : Ui::T.inputBg;
+            SetTextColor((HDC)w, Ui::Ref(Ui::Solid(Ui::T.text, bg)));
+            SetBkColor((HDC)w, Ui::Ref(bg));
+            return (LRESULT)(f ? self->brushFocus : self->brushRest);
+        }
+        case WM_MOUSEMOVE:
+        {
+            if (!self->tracking)
             {
-            case IdAuto: App::SetAutoStart(Button_GetCheck((HWND)l) == BST_CHECKED); return 0;
-            case IdHkEnable:
-                g_app->settings.hotkeyEnabled = Button_GetCheck((HWND)l) == BST_CHECKED;
-                Store::SaveSettings(g_app->settings);
-                EnableWindow(self->hotkey, g_app->settings.hotkeyEnabled);
-                self->ShowHotkeyStatus(g_app->ApplyHotkey());
-                return 0;
-            case IdHotkey: if (HIWORD(w) == EN_CHANGE) self->OnHotkeyChanged(); return 0;
-            case IdOpenDir: ShellExecuteW(nullptr, L"open", L"explorer.exe", Store::Dir.c(), nullptr, SW_SHOWNORMAL); return 0;
-            case IdOpenBackup:
-                EnsureDir(Store::BackupsDir.c());
-                ShellExecuteW(nullptr, L"open", L"explorer.exe", Store::BackupsDir.c(), nullptr, SW_SHOWNORMAL);
-                return 0;
-            case IdSyncNow: self->SaveSync(); return 0;
-            case IdSetClose: case IDCANCEL: DestroyWindow(h); return 0;
+                TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
+                TrackMouseEvent(&t);
+                self->tracking = true;
             }
+            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            if (id != self->hover) { self->hover = id; self->Invalidate(); }
             return 0;
+        }
+        case WM_MOUSELEAVE:
+            self->tracking = false;
+            if (self->hover) { self->hover = SNone; self->Invalidate(); }
+            return 0;
+        case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
+        {
+            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            if (self->recording && id != SHkKeys) self->StopRecording();
+            if (GetFocus() != h) SetFocus(h); // 点空白处：输入框失去焦点
+            self->press = id;
+            if (id) SetCapture(h);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        {
+            int p = self->press;
+            self->press = SNone;
+            if (GetCapture() == h) ReleaseCapture();
+            if (p && self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l)) == p) self->Activate(p);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+        {
+            float old = self->scroll;
+            self->scroll -= GET_WHEEL_DELTA_WPARAM(w) / 120.f * 60;
+            self->ClampScroll();
+            if (self->scroll != old) { self->Invalidate(); UpdateWindow(h); }
+            return 0;
+        }
+        case WM_KEYDOWN: case WM_SYSKEYDOWN:
+            if (self->recording) { self->OnRecordKey((UINT)w); return 0; }
+            break;
+        case WM_KEYUP: case WM_SYSKEYUP:
+            if (self->recording) { self->recMods = CurMods(); self->Invalidate(); return 0; }
+            break;
+        case WM_SYSCHAR: case WM_CHAR:
+            if (self->recording) return 0;
+            break;
+        case WM_SYSCOMMAND:
+            if (self->recording && (w & 0xFFF0) == SC_KEYMENU) return 0;
+            break;
+        case WM_KILLFOCUS:
+            self->StopRecording();
+            return 0;
+        case WM_ACTIVATE:
+            if (LOWORD(w) == WA_INACTIVE) self->StopRecording();
+            break;
+        case WM_COMMAND:
+        {
+            int id = LOWORD(w), code = HIWORD(w);
+            if (id >= 100 && id < 103 && (code == EN_SETFOCUS || code == EN_KILLFOCUS))
+            {
+                self->Invalidate();
+                InvalidateRect((HWND)l, nullptr, TRUE);
+                return 0;
+            }
+            if (id == IDOK) { HWND f = GetFocus(); for (int i = 0; i < 3; i++) if (f == self->edits[i]) self->SaveSync(); return 0; }
+            if (id == IDCANCEL) { DestroyWindow(h); return 0; }
+            return 0;
+        }
+        case WM_SIZE:
+            self->ClampScroll();
+            self->PlaceEdits();
+            return 0;
+        case WM_DPICHANGED:
+        {
+            self->dpi = HIWORD(w);
+            self->MakeFont();
+            RECT* rc = (RECT*)l;
+            SetWindowPos(h, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            self->ClampScroll();
+            self->PlaceEdits();
+            self->Invalidate();
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+            if (l && WEq((const wchar_t*)l, L"ImmersiveColorSet")) self->ApplyTheme();
+            break;
         case WM_CLOSE: DestroyWindow(h); return 0;
         case WM_DESTROY:
             g_app->ApplyHotkey();
             g_app->settingsWnd = nullptr;
             SetWindowLongPtrW(h, GWLP_USERDATA, 0);
+            if (self->editFont) DeleteObject(self->editFont);
+            if (self->brushRest) DeleteObject(self->brushRest);
+            if (self->brushFocus) DeleteObject(self->brushFocus);
             delete self;
             return 0;
         }
@@ -568,20 +970,41 @@ struct SettingsDlg : DlgBase
 
 HWND SettingsWindowCreate()
 {
-    SettingsDlg* d = new SettingsDlg();
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"DeskNoteSettings", L"DeskNote 设置", WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+    Ui::LoadTheme();
+    SettingsWin* d = new SettingsWin();
+    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"DeskNoteSettings", L"DeskNote 设置", WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                              CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, g_inst, d);
     d->dpi = GetDpiForWindow(h);
     SetIcons(h);
-    d->Build();
-    d->Center();
+    ApplyFrameTheme(h);
+    d->Init();
+    d->Build(nullptr);
+    // 放到鼠标所在屏幕中间；内容太高时窗口按屏幕高度截短，用滚轮滚
+    POINT p;
+    GetCursorPos(&p);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
+    float S = d->S();
+    int maxH = (int)((mi.rcWork.bottom - mi.rcWork.top) * 0.9f);
+    RECT r = { 0, 0, (int)(SettingsWin::Width * S + 0.5f), Min((int)(d->contentH * S + 0.5f), maxH - (int)(40 * S)) };
+    AdjustWindowRectExForDpi(&r, GetWindowLongW(h, GWL_STYLE), FALSE, GetWindowLongW(h, GWL_EXSTYLE), d->dpi);
+    int w = r.right - r.left, ht = r.bottom - r.top;
+    SetWindowPos(h, nullptr, (mi.rcWork.left + mi.rcWork.right - w) / 2, (mi.rcWork.top + mi.rcWork.bottom - ht) / 2, w, ht, SWP_NOZORDER | SWP_NOACTIVATE);
+    d->ClampScroll();
+    d->PlaceEdits();
     return h;
 }
 
 void SettingsWindowSyncStatus(HWND w)
 {
-    SettingsDlg* d = (SettingsDlg*)GetWindowLongPtrW(w, GWLP_USERDATA);
-    if (d) d->RefreshSync();
+    SettingsWin* d = (SettingsWin*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    if (d) d->Invalidate();
+}
+
+bool SettingsWindowWantsKeys(HWND w)
+{
+    SettingsWin* d = (SettingsWin*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    return d && d->recording;
 }
 
 // =====================================================================
@@ -700,91 +1123,6 @@ bool ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time curre
     return d.ok;
 }
 
-// =====================================================================
-// 不透明度和字号（拖动时实时预览）
-// =====================================================================
-enum { IdOpacity = 60, IdFont, IdOpacityVal, IdFontVal, IdAppClose };
-struct AppearanceDlg : DlgBase
-{
-    bool done = false;
-    NoteData* d = nullptr;
-    void (*apply)(void*) = nullptr;
-    void* ctx = nullptr;
-    HWND opacity, font, opacityVal, fontVal;
-    void Build()
-    {
-        const int W = 360, X = 20;
-        int y = 18;
-        Add(L"STATIC", L"不透明度", SS_LEFT, X, y + 4, 64, 22, 0);
-        opacity = Add(TRACKBAR_CLASSW, L"", WS_TABSTOP | TBS_HORZ | TBS_NOTICKS, X + 66, y, 200, 30, IdOpacity);
-        SendMessageW(opacity, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
-        SendMessageW(opacity, TBM_SETPOS, TRUE, (LPARAM)(int)(d->opacity * 100 + 0.5));
-        opacityVal = Add(L"STATIC", L"", SS_RIGHT, X + 270, y + 4, 50, 22, IdOpacityVal);
-        y += 40;
-        Add(L"STATIC", L"字号", SS_LEFT, X, y + 4, 64, 22, 0);
-        font = Add(TRACKBAR_CLASSW, L"", WS_TABSTOP | TBS_HORZ | TBS_NOTICKS, X + 66, y, 200, 30, IdFont);
-        SendMessageW(font, TBM_SETRANGE, TRUE, MAKELPARAM(10, 40));
-        SendMessageW(font, TBM_SETPOS, TRUE, (LPARAM)(int)(d->fontSize + 0.5));
-        fontVal = Add(L"STATIC", L"", SS_RIGHT, X + 270, y + 4, 50, 22, IdFontVal);
-        y += 46;
-        Add(L"BUTTON", L"关闭", WS_TABSTOP | BS_DEFPUSHBUTTON, W - 20 - 84, y, 84, 28, IdAppClose);
-        y += 44;
-        SizeClient(W, y);
-        Center();
-        UpdateLabels();
-    }
-    void UpdateLabels()
-    {
-        Str a;
-        a.Int((int)SendMessageW(opacity, TBM_GETPOS, 0, 0)).Ch(L'%');
-        SetWindowTextW(opacityVal, a.c());
-        Str f;
-        f.Int((int)SendMessageW(font, TBM_GETPOS, 0, 0));
-        SetWindowTextW(fontVal, f.c());
-    }
-    static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
-    {
-        AppearanceDlg* self = (AppearanceDlg*)GetWindowLongPtrW(h, GWLP_USERDATA);
-        if (m == WM_NCCREATE)
-        {
-            self = (AppearanceDlg*)((CREATESTRUCTW*)l)->lpCreateParams;
-            self->hwnd = h;
-            SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
-        }
-        if (!self) return DefWindowProcW(h, m, w, l);
-        LRESULT r;
-        if (self->Common(m, w, l, &r)) return r;
-        switch (m)
-        {
-        case WM_HSCROLL:
-            self->d->opacity = SendMessageW(self->opacity, TBM_GETPOS, 0, 0) / 100.0;
-            self->d->fontSize = (double)SendMessageW(self->font, TBM_GETPOS, 0, 0);
-            self->UpdateLabels();
-            self->apply(self->ctx);
-            return 0;
-        case WM_COMMAND:
-            if (LOWORD(w) == IdAppClose || LOWORD(w) == IDCANCEL || LOWORD(w) == IDOK) self->done = true;
-            return 0;
-        case WM_CLOSE: self->done = true; return 0;
-        }
-        return DefWindowProcW(h, m, w, l);
-    }
-};
-
-void AppearanceDialog(HWND owner, NoteData* d, void (*apply)(void*), void* ctx)
-{
-    AppearanceDlg dlg;
-    dlg.d = d;
-    dlg.apply = apply;
-    dlg.ctx = ctx;
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_TOPMOST, L"DeskNoteAppearance", L"不透明度和字号", WS_CAPTION | WS_SYSMENU,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, owner, nullptr, g_inst, &dlg);
-    dlg.dpi = GetDpiForWindow(h);
-    SetIcons(h);
-    dlg.Build();
-    RunModal(h, owner, &dlg.done);
-}
-
 void RegisterDialogClasses()
 {
     WNDCLASSW wc = {};
@@ -792,7 +1130,8 @@ void RegisterDialogClasses()
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     wc.lpfnWndProc = TrashDlg::Proc; wc.lpszClassName = L"DeskNoteTrash"; RegisterClassW(&wc);
-    wc.lpfnWndProc = SettingsDlg::Proc; wc.lpszClassName = L"DeskNoteSettings"; RegisterClassW(&wc);
     wc.lpfnWndProc = ReminderDlg::Proc; wc.lpszClassName = L"DeskNoteReminder"; RegisterClassW(&wc);
-    wc.lpfnWndProc = AppearanceDlg::Proc; wc.lpszClassName = L"DeskNoteAppearance"; RegisterClassW(&wc);
+    wc.style = CS_DBLCLKS;
+    wc.hbrBackground = nullptr;
+    wc.lpfnWndProc = SettingsWin::Proc; wc.lpszClassName = L"DeskNoteSettings"; RegisterClassW(&wc);
 }

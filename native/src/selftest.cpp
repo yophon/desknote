@@ -423,6 +423,9 @@ void MemDiagRun(const Str& outFile)
     Sample(out, L"重绘 200 次");
     Pump(4500);
     Sample(out, L"空闲后（释放绘图）");
+    for (int i = 0; i < 20; i++) { g_app->ShowSettings(); Pump(200); DestroyWindow(g_app->settingsWnd); }
+    Pump(4500);
+    Sample(out, L"再开关设置 20 次、空闲后（看有没有越开越多）");
     Bytes b = ToUtf8(out);
     WriteFileBytes(outFile.c(), b.p, b.n);
     g_app->Exit();

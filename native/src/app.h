@@ -72,6 +72,8 @@ public:
 
     // 自测、调界面用
     void DebugPreview() { Collapse(); ShowPreview(); KillTimer(hwnd, 1); }
+    void DebugMenu(int sub);
+    void OnMenuLive(int id, float v);
     void TestTypeItem(int index, const wchar_t* text);
     void TestBeginEdit(int index, const wchar_t* text);
     void TestMenuDelete(int index);
@@ -106,6 +108,7 @@ private:
     D2D1_RECT_F collapseBtn = {};
     bool hover = false, hoverCollapse = false;
     bool sizing = false;
+    bool menuChanged = false;
     int HitRow(float yDip) const;
     int HitEdge(int x, int y) const;
 
@@ -247,8 +250,8 @@ HWND TrashWindowCreate();
 void TrashWindowRefresh(HWND w);
 HWND SettingsWindowCreate();
 void SettingsWindowSyncStatus(HWND w);
+bool SettingsWindowWantsKeys(HWND w); // 正在录快捷键：按键别交给对话框导航处理
 bool ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result);
-void AppearanceDialog(HWND owner, NoteData* d, void (*apply)(void*), void* ctx);
 bool HotkeyParse(const Str& s, UINT* mods, UINT* vk);
 Str HotkeyFormat(UINT mods, UINT vk);
 void RegisterDialogClasses();

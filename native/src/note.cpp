@@ -1,5 +1,5 @@
 // 一张便签的窗口：绘制、布局、鼠标键盘、编辑、排序、撤销、胶囊、窗口模式、右键菜单
-#include "app.h"
+#include "ui.h"
 #include <windowsx.h>
 #include <commctrl.h>
 #include <shellapi.h>
@@ -40,71 +40,6 @@ namespace Gfx
         return c;
     }
 }
-
-template <class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
-
-// 画布：一块 32 位位图 + Direct2D 渲染目标，画完交给 UpdateLayeredWindow
-struct Canvas
-{
-    HDC screen = nullptr, mem = nullptr;
-    HBITMAP bmp = nullptr;
-    HGDIOBJ old = nullptr;
-    void* bits = nullptr;
-    ID2D1DCRenderTarget* rt = nullptr;
-    int pw = 0, ph = 0;
-
-    bool Begin(int w, int h, float dpi)
-    {
-        pw = Max(w, 1); ph = Max(h, 1);
-        screen = GetDC(nullptr);
-        mem = CreateCompatibleDC(screen);
-        BITMAPINFO bi = {};
-        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-        bi.bmiHeader.biWidth = pw; bi.bmiHeader.biHeight = -ph;
-        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
-        bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        if (!bmp) return false;
-        old = SelectObject(mem, bmp);
-        D2D1_RENDER_TARGET_PROPERTIES props = {};
-        props.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;
-        props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-        props.dpiX = props.dpiY = dpi;
-        HRESULT hr = Gfx::D2D()->CreateDCRenderTarget(&props, &rt);
-        if (FAILED(hr)) { Str m(L"CreateDCRenderTarget 失败 hr="); m.Int((i64)(u32)hr); Log(m); return false; }
-        RECT rc = { 0, 0, pw, ph };
-        rt->BindDC(mem, &rc);
-        rt->BeginDraw();
-        D2D1_COLOR_F clear = {};
-        rt->Clear(&clear);
-        return true;
-    }
-    void End(HWND hwnd)
-    {
-        if (rt)
-        {
-            HRESULT hr = rt->EndDraw();
-            if (FAILED(hr)) { Str m(L"EndDraw 失败 hr="); m.Int((i64)(u32)hr); Log(m); }
-            rt->Release();
-            rt = nullptr;
-        }
-        GdiFlush();
-        POINT src = { 0, 0 };
-        SIZE sz = { pw, ph };
-        BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-        if (!UpdateLayeredWindow(hwnd, screen, nullptr, &sz, mem, &src, 0, &bf, ULW_ALPHA))
-        {
-            Str m(L"UpdateLayeredWindow 失败 err=");
-            m.Int(GetLastError()).Append(L" size=").Int(pw).Ch(L'x').Int(ph).Append(L" bmp=").Int(bmp ? 1 : 0);
-            Log(m);
-        }
-        if (old) SelectObject(mem, old);
-        if (bmp) DeleteObject(bmp);
-        if (mem) DeleteDC(mem);
-        if (screen) ReleaseDC(nullptr, screen);
-        Gfx::Touch();
-    }
-};
 
 static IDWriteTextFormat* MakeFormat(float size, int weight, bool wrap)
 {
@@ -1492,31 +1427,36 @@ LRESULT CALLBACK NoteWin::PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l)
 enum
 {
     CmdUndo = 1, CmdRedo, CmdUp, CmdDown, CmdDelete, CmdRemind, CmdUnremind, CmdAdd, CmdClearDone,
-    CmdFold, CmdChecks, CmdModeDesktop, CmdModeTopmost, CmdModeNormal, CmdAppearance, CmdShadow,
+    CmdFold, CmdChecks, CmdModeDesktop, CmdModeTopmost, CmdModeNormal, CmdShadow, CmdOpacity, CmdFontSize,
     CmdNewNote, CmdDeleteNote, CmdTrash, CmdSettings, CmdExit,
     CmdWeight = 100, CmdTextColor = 200, CmdTextColorCustom = 220, CmdBgColor = 300, CmdBgColorCustom = 320
 };
-struct Swatch { const wchar_t* name; u32 rgb; };
-static const Swatch TextSwatches[] = {
-    { L"默认灰", DefaultTextColor }, { L"白", 0xF5F5F5 }, { L"黑", 0x222222 }, { L"黄", 0xF2C94C },
-    { L"橙", 0xF08A3C }, { L"红", 0xE55B5B }, { L"绿", 0x6CC27A }, { L"蓝", 0x5BA8E5 } };
-static const Swatch BgSwatches[] = {
-    { L"默认蓝灰", DefaultBgColor }, { L"黑", 0x1E1E1E }, { L"白", 0xFAFAFA }, { L"便签黄", 0xFFF1A8 },
-    { L"浅绿", 0xD4F0D0 }, { L"浅蓝", 0xD2E6F8 }, { L"浅粉", 0xF9D9E3 }, { L"墨绿", 0x233B33 } };
+static const u32 TextColors[] = { DefaultTextColor, 0xF5F5F5, 0x222222, 0xF2C94C, 0xF08A3C, 0xE55B5B, 0x6CC27A, 0x5BA8E5 };
+static const u32 BgColors[] = { DefaultBgColor, 0x1E1E1E, 0xFAFAFA, 0xFFF1A8, 0xD4F0D0, 0xD2E6F8, 0xF9D9E3, 0x233B33 };
 static const int Weights[] = { 300, 400, 600, 700 };
-static const wchar_t* WeightNames[] = { L"细", L"常规", L"中粗", L"粗" };
+static const wchar_t* const WeightNames[] = { L"细", L"常规", L"中粗", L"粗" };
 
-static void AddItem(HMENU m, int id, const wchar_t* text, bool checked = false, bool radio = false)
+static int IndexOfColor(const u32* list, u32 c)
 {
-    MENUITEMINFOW mi = { sizeof(mi) };
-    mi.fMask = MIIM_ID | MIIM_STRING | MIIM_STATE | MIIM_FTYPE;
-    mi.fType = MFT_STRING | (radio ? MFT_RADIOCHECK : 0);
-    mi.fState = checked ? MFS_CHECKED : 0;
-    mi.wID = id;
-    mi.dwTypeData = (LPWSTR)text;
-    InsertMenuItemW(m, GetMenuItemCount(m), TRUE, &mi);
+    for (int i = 0; i < 8; i++) if (list[i] == c) return i;
+    return -1;
 }
-static void AddSep(HMENU m) { AppendMenuW(m, MF_SEPARATOR, 0, nullptr); }
+
+// 菜单里拖滑块、点色块：直接改这张便签并重画，菜单不关
+static void NoteMenuLive(void* ctx, int id, float v) { ((NoteWin*)ctx)->OnMenuLive(id, v); }
+
+void NoteWin::OnMenuLive(int id, float v)
+{
+    if (id == CmdOpacity) d->opacity = v / 100.0;
+    else if (id == CmdFontSize) d->fontSize = v;
+    else if (id == CmdShadow) d->shadow = v > 0;
+    else if (id >= CmdWeight && id < CmdWeight + 4) d->fontWeight = Weights[id - CmdWeight];
+    else if (id >= CmdTextColor && id < CmdTextColor + 8) d->textColor = TextColors[id - CmdTextColor];
+    else if (id >= CmdBgColor && id < CmdBgColor + 8) d->bgColor = BgColors[id - CmdBgColor];
+    else return;
+    menuChanged = true;
+    Render();
+}
 
 void NoteWin::OnContextMenu(int sx, int sy)
 {
@@ -1530,62 +1470,79 @@ void NoteWin::OnContextMenu(int sx, int sy)
         target = HitRow(p.y / Scale());
     }
     bool onItem = !d->collapsed && target >= 0 && target < d->items.n;
-    HMENU m = CreatePopupMenu();
-    if (undo.n) AddItem(m, CmdUndo, L"撤销\tCtrl+Z");
-    if (redo.n) AddItem(m, CmdRedo, L"重做\tCtrl+Y");
-    if (undo.n || redo.n) AddSep(m);
-    if (onItem && target > 0) AddItem(m, CmdUp, L"上移");
-    if (onItem && target < d->items.n - 1) AddItem(m, CmdDown, L"下移");
-    if (onItem) AddItem(m, CmdDelete, L"删除这一条");
-    AddItem(m, CmdAdd, L"新增一条");
+    Ui::Menu m;
+    // 右键点在条目上：先列针对这一条的操作，标题行显示是哪一条
     if (onItem)
     {
-        AddItem(m, CmdRemind, d->items[target].hasRemind ? L"修改提醒…" : L"设置提醒…");
-        if (d->items[target].hasRemind) AddItem(m, CmdUnremind, L"取消提醒");
+        const NoteItem& it = d->items[target];
+        Str t = it.text.Replace(L"\r", L"").Replace(L"\n", L" ").Trim();
+        m.Header(t.n ? t : Str(L"（空白条目）"));
+        m.Item(CmdRemind, it.hasRemind ? L"修改提醒…" : L"设置提醒…", 0xEA8F);
+        if (it.hasRemind) m.Item(CmdUnremind, L"取消提醒", 0xE7ED);
+        if (target > 0) m.Item(CmdUp, L"上移", 0xE74A);
+        if (target < d->items.n - 1) m.Item(CmdDown, L"下移", 0xE74B);
+        m.Item(CmdDelete, L"删除这一条", 0xE74D);
+        m.Sep();
     }
+    m.Item(CmdAdd, L"新增一条", 0xE710);
     bool anyDone = false;
     for (int i = 0; i < d->items.n; i++) if (d->items[i].done) anyDone = true;
-    if (d->checkboxes && anyDone) AddItem(m, CmdClearDone, L"清除已完成的条目");
-    AddSep(m);
-    AddItem(m, CmdFold, d->collapsed ? L"展开" : L"折叠成胶囊");
-    AddItem(m, CmdChecks, L"显示勾选框", d->checkboxes);
-    HMENU modes = CreatePopupMenu();
-    AddItem(modes, CmdModeDesktop, L"置底在桌面（显示桌面时也在）", d->mode == ModeDesktop, true);
-    AddItem(modes, CmdModeTopmost, L"置顶（总在最前面）", d->mode == ModeTopmost, true);
-    AddItem(modes, CmdModeNormal, L"普通窗口（出现在任务栏）", d->mode == ModeNormal, true);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)modes, L"窗口模式");
-    AddSep(m);
-    AddItem(m, CmdAppearance, L"不透明度和字号…");
-    HMENU weight = CreatePopupMenu();
-    for (int i = 0; i < 4; i++) AddItem(weight, CmdWeight + i, WeightNames[i], d->fontWeight == Weights[i], true);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)weight, L"粗细");
-    HMENU tc = CreatePopupMenu();
-    for (int i = 0; i < 8; i++) AddItem(tc, CmdTextColor + i, TextSwatches[i].name, d->textColor == TextSwatches[i].rgb, true);
-    AddSep(tc);
-    AddItem(tc, CmdTextColorCustom, L"自定义…");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)tc, L"文字颜色");
-    HMENU bc = CreatePopupMenu();
-    for (int i = 0; i < 8; i++) AddItem(bc, CmdBgColor + i, BgSwatches[i].name, d->bgColor == BgSwatches[i].rgb, true);
-    AddSep(bc);
-    AddItem(bc, CmdBgColorCustom, L"自定义…");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)bc, L"背景颜色");
-    AddItem(m, CmdShadow, L"文字阴影（背景很透明时更清楚）", d->shadow);
-    AddSep(m);
-    AddItem(m, CmdNewNote, L"新建便签");
-    AddItem(m, CmdDeleteNote, L"删除这张便签…");
-    AddItem(m, CmdTrash, L"回收站…");
-    AddItem(m, CmdSettings, L"设置…");
-    AddSep(m);
-    AddItem(m, CmdExit, L"退出 DeskNote");
-    SetForegroundWindow(hwnd);
-    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sx, sy, 0, hwnd, nullptr);
-    DestroyMenu(m);
+    if (d->checkboxes && anyDone) m.Item(CmdClearDone, L"清除已完成", 0xE9D5);
+    if (undo.n || redo.n)
+    {
+        m.Item(CmdUndo, L"撤销", 0xE7A7, L"Ctrl+Z").disabled = !undo.n;
+        m.Item(CmdRedo, L"重做", 0xE7A6, L"Ctrl+Y").disabled = !redo.n;
+    }
+    m.Sep();
+    Ui::Menu* look = m.Sub(L"外观", 0xE790);
+    look->Header(L"背景");
+    look->Swatches(CmdBgColor, BgColors, 8, IndexOfColor(BgColors, d->bgColor), CmdBgColorCustom, d->bgColor);
+    look->Header(L"文字");
+    look->Swatches(CmdTextColor, TextColors, 8, IndexOfColor(TextColors, d->textColor), CmdTextColorCustom, d->textColor);
+    look->Sep();
+    look->Slider(CmdOpacity, L"不透明度", 0, 100, (float)(d->opacity * 100), 5, L"%");
+    look->Slider(CmdFontSize, L"字号", 10, 40, (float)d->fontSize, 1, L"");
+    int wsel = -1;
+    for (int i = 0; i < 4; i++) if (d->fontWeight == Weights[i]) wsel = i;
+    look->Segment(CmdWeight, L"粗细", WeightNames, 4, wsel);
+    look->Sep();
+    look->Check(CmdShadow, L"文字阴影", d->shadow, L"背景很透明时，文字更清楚").live = true;
+    Ui::Menu* modes = m.Sub(L"窗口模式", 0xE718);
+    modes->Radio(CmdModeDesktop, L"置底", L"贴在桌面上，显示桌面时也在", d->mode == ModeDesktop);
+    modes->Radio(CmdModeTopmost, L"置顶", L"总在其他窗口前面", d->mode == ModeTopmost);
+    modes->Radio(CmdModeNormal, L"普通窗口", L"和其他程序一样，出现在任务栏", d->mode == ModeNormal);
+    m.Check(CmdChecks, L"显示勾选框", d->checkboxes);
+    m.Item(CmdFold, d->collapsed ? L"展开" : L"折叠成胶囊", d->collapsed ? 0xE740 : 0xE73F);
+    m.Sep();
+    m.Item(CmdNewNote, L"新建便签", 0xE70B);
+    m.Item(CmdDeleteNote, L"删除这张便签…", 0xE74D);
+    m.Sep();
+    m.Item(CmdTrash, L"回收站", 0xE7B8);
+    m.Item(CmdSettings, L"设置", 0xE713);
+    m.Item(CmdExit, L"退出 DeskNote", 0xE7E8);
+
+    // 菜单里实时调的外观算一步撤销
+    BeginChange();
+    menuChanged = false;
+    int cmd = Ui::MenuRun(hwnd, &m, sx, sy, NoteMenuLive, this);
+    if (menuChanged) Save();
+    EndChange();
+    if (menuChanged) SendToBottom();
     PostMessageW(hwnd, WM_NULL, 0, 0);
     if (cmd) RunCommand(cmd, target);
     if (hwnd && d->collapsed) ScheduleCapsuleHide();
 }
 
-static void ApplyAppearance(void* ctx) { ((NoteWin*)ctx)->Render(); }
+void NoteWin::DebugMenu(int sub)
+{
+    RECT r;
+    GetWindowRect(hwnd, &r);
+    float S = Scale();
+    int y = r.top + (int)((rows.n ? rows[0].top - scrollY + 6 : 40) * S);
+    Ui::MenuDebugOpenSub = sub;
+    Ui::MenuDebug = true;
+    OnContextMenu(r.left + (int)(60 * S), y);
+}
 
 void NoteWin::RunCommand(int cmd, int target)
 {
@@ -1604,14 +1561,6 @@ void NoteWin::RunCommand(int cmd, int target)
     case CmdFold: if (d->collapsed) Expand(); else Collapse(); return;
     case CmdTextColorCustom: PickColor(false); return;
     case CmdBgColorCustom: PickColor(true); return;
-    case CmdAppearance:
-        BeginChange();
-        AppearanceDialog(hwnd, d, ApplyAppearance, this);
-        Save();
-        EndChange();
-        Render();
-        SendToBottom();
-        return;
     }
     // 其余都是改内容/外观：算一步撤销
     BeginChange();
@@ -1629,8 +1578,8 @@ void NoteWin::RunCommand(int cmd, int target)
     case CmdModeNormal: SetMode(ModeNormal); break;
     default:
         if (cmd >= CmdWeight && cmd < CmdWeight + 4) d->fontWeight = Weights[cmd - CmdWeight];
-        else if (cmd >= CmdTextColor && cmd < CmdTextColor + 8) d->textColor = TextSwatches[cmd - CmdTextColor].rgb;
-        else if (cmd >= CmdBgColor && cmd < CmdBgColor + 8) d->bgColor = BgSwatches[cmd - CmdBgColor].rgb;
+        else if (cmd >= CmdTextColor && cmd < CmdTextColor + 8) d->textColor = TextColors[cmd - CmdTextColor];
+        else if (cmd >= CmdBgColor && cmd < CmdBgColor + 8) d->bgColor = BgColors[cmd - CmdBgColor];
         break;
     }
     Save();
