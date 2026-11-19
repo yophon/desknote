@@ -78,6 +78,7 @@ JVal* NoteData::ToJson() const
         ->SetBool(L"shadow", shadow)->SetBool(L"checkboxes", checkboxes);
     JVal* win = JNewObj();
     win->SetStr(L"mode", mode == ModeTopmost ? L"topmost" : mode == ModeNormal ? L"normal" : L"desktop")->SetBool(L"collapsed", collapsed);
+    if (hidden) win->SetBool(L"hidden", true);
     if (hasPos) win->SetNum(L"x", Round0(x))->SetNum(L"y", Round0(y));
     else win->SetNull(L"x")->SetNull(L"y");
     win->SetNum(L"width", Round1(width))->SetNum(L"height", Round1(height));
@@ -130,6 +131,7 @@ NoteData* NoteData::From(JVal* d, const Str& id)
         Str m = w->Str_(L"mode", L"desktop");
         n->mode = m.Eq(L"topmost") ? ModeTopmost : m.Eq(L"normal") ? ModeNormal : ModeDesktop;
         n->collapsed = w->Bool(L"collapsed", false);
+        n->hidden = w->Bool(L"hidden", false);
         JVal* x = w->Get(L"x");
         JVal* y = w->Get(L"y");
         if (x && y && x->t == JNum && y->t == JNum) { n->hasPos = true; n->x = x->num; n->y = y->num; }

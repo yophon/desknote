@@ -30,6 +30,7 @@ struct NoteData
     bool shadow = false, checkboxes = false;
     WinMode mode = ModeDesktop;
     bool collapsed = false;
+    bool hidden = false;              // 在这台电脑上隐藏（存在 window 段，不同步）
     bool hasPos = false;
     double x = 0, y = 0;              // 物理像素
     double width = 340, height = 420; // DIP

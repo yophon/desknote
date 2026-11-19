@@ -215,7 +215,7 @@ static void DrawLayout(ID2D1RenderTarget* rt, float x, float y, IDWriteTextLayou
 // =====================================================================
 static const wchar_t* NoteClass = L"DeskNoteNote";
 static const wchar_t* PreviewClass = L"DeskNotePreview";
-enum { TimerHide = 1, TimerSlide = 2, TimerProgman = 3, TimerCaret = 4 };
+enum { TimerHide = 1, TimerSlide = 2, TimerProgman = 3, TimerCaret = 4, TimerFlash = 5 };
 
 bool NoteWin::debugNoFocus = false;
 NoteWin::NoteWin(NoteData* data) : d(data) {}
@@ -370,6 +370,7 @@ void NoteWin::Render()
             FillCornerRect(c.rt, D2D1::RectF(0, 0, W, H), dockL || dockT ? 0 : r, dockR || dockT ? 0 : r,
                            dockR || dockB ? 0 : r, dockL || dockB ? 0 : r, bg);
             if (!docked) Ui::Stroke(c.rt, D2D1::RectF(0, 0, W, H), r, Argb(d->textColor, 0.14f), 1);
+            if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(c.rt, D2D1::RectF(0, 0, W, H), r, Ui::T.accent, 3);
             c.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             c.rt->DrawTextLayout(D2D1::Point2F(14, (H - th) / 2), lt, fg, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP);
             D2D1_RECT_F br = D2D1::RectF(W - 8 - badgeW, (H - badgeH) / 2, W - 8, (H + badgeH) / 2);
@@ -400,6 +401,7 @@ void NoteWin::Render()
         rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(0, 0, W, H), radius, radius), bg);
         // 细描边：背景很透明时只在鼠标移上来时出现，平时只剩文字
         if (d->opacity >= 0.12 || hover) Ui::Stroke(rt, D2D1::RectF(0, 0, W, H), radius, Argb(d->textColor, hover ? 0.18f : 0.1f), 1);
+        if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(rt, D2D1::RectF(0, 0, W, H), radius, Ui::T.accent, 3);
 
         bool showUi = hover && editIndex == NotEditing && dragIndex < 0 && !g_app->peeking;
         float left = PadX, right = W - PadX, top = PadTop, bottom = H - PadBottom;
@@ -555,7 +557,7 @@ void NoteWin::Save()
 
 void NoteWin::ReloadFrom(NoteData* fresh, bool keepWindow)
 {
-    if (keepWindow) { fresh->mode = d->mode; fresh->collapsed = d->collapsed; }
+    if (keepWindow) { fresh->mode = d->mode; fresh->collapsed = d->collapsed; fresh->hidden = d->hidden; }
     if (Editing() || dragIndex >= 0 || changeDepth > 0)
     {
         delete pendingReload;
@@ -572,8 +574,13 @@ void NoteWin::ApplyExternal(NoteData* fresh)
     bool wasCollapsed = d->collapsed;
     d->CopyContentFrom(*fresh);
     ClearUndo(); // 外部改过以后，旧的撤销记录对不上了
-    if (fresh->mode != d->mode) SetMode(fresh->mode);
-    if (fresh->collapsed != wasCollapsed) { if (fresh->collapsed) Collapse(); else Expand(); }
+    if (fresh->hidden != d->hidden) SetHidden(fresh->hidden);
+    if (!hwnd) { d->mode = fresh->mode; d->collapsed = fresh->collapsed; } // 隐藏着：只记下来，显示时按它建窗口
+    else
+    {
+        if (fresh->mode != d->mode) SetMode(fresh->mode);
+        if (fresh->collapsed != wasCollapsed) { if (fresh->collapsed) Collapse(); else Expand(); }
+    }
     Save();
 }
 
@@ -1554,6 +1561,35 @@ void NoteWin::SetMode(WinMode m)
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 }
 
+// 隐藏：销毁窗口（绘图资源一起释放，不占内存），便签对象和数据都留着，提醒、同步照常
+void NoteWin::SetHidden(bool hide)
+{
+    tempShown = false;
+    d->hidden = hide;
+    if (hide) { if (hwnd) { peeking = false; Destroy(); } }
+    else if (!hwnd) Create();
+    Save();
+}
+
+// 隐藏的便签到了提醒：临时建出窗口，结束「提到最前」时收回去（不改隐藏状态）
+void NoteWin::ShowTemporarily()
+{
+    if (hwnd) return;
+    tempShown = true;
+    Create();
+}
+
+void NoteWin::Locate()
+{
+    if (!hwnd) return;
+    Ui::LoadTheme();
+    BringOnScreen();
+    BeginPeek(); // 置顶，闪完放回去
+    flashUntil = GetTickCount() + 1600;
+    SetTimer(hwnd, TimerFlash, 200, nullptr);
+    Render();
+}
+
 // 置底模式：让桌面(Progman)成为所有者，Win+D 显示桌面时不会被藏起来；开机时桌面可能还没建好，就每 2 秒重试
 void NoteWin::AttachToDesktop()
 {
@@ -1932,7 +1968,7 @@ enum
 {
     CmdUndo = 1, CmdRedo, CmdUp, CmdDown, CmdDelete, CmdRemind, CmdUnremind, CmdAdd, CmdClearDone,
     CmdFold, CmdChecks, CmdModeDesktop, CmdModeTopmost, CmdModeNormal, CmdShadow, CmdOpacity, CmdFontSize,
-    CmdNewNote, CmdDeleteNote, CmdTrash, CmdSettings, CmdExit,
+    CmdNewNote, CmdDeleteNote, CmdTrash, CmdSettings, CmdExit, CmdHide, CmdManage,
     CmdWeight = 100, CmdTextColor = 200, CmdTextColorCustom = 220, CmdBgColor = 300, CmdBgColorCustom = 320
 };
 static const u32 TextColors[] = { DefaultTextColor, 0xF5F5F5, 0x222222, 0xF2C94C, 0xF08A3C, 0xE55B5B, 0x6CC27A, 0x5BA8E5 };
@@ -2025,8 +2061,10 @@ void NoteWin::OnContextMenu(int sx, int sy)
     m.Item(CmdFold, d->collapsed ? L"展开" : L"折叠成胶囊", d->collapsed ? 0xE740 : 0xE73F);
     m.Sep();
     m.Item(CmdNewNote, L"新建便签", 0xE70B);
+    m.Item(CmdHide, L"隐藏这张便签", 0xED1A);
     m.Item(CmdDeleteNote, L"删除这张便签…", 0xE74D);
     m.Sep();
+    m.Item(CmdManage, L"便签管理", 0xE71D);
     m.Item(CmdTrash, L"回收站", 0xE7B8);
     m.Item(CmdSettings, L"设置", 0xE713);
     m.Item(CmdExit, L"退出 DeskNote", 0xE7E8);
@@ -2038,7 +2076,7 @@ void NoteWin::OnContextMenu(int sx, int sy)
     if (menuChanged) Save();
     EndChange();
     if (menuChanged) SendToBottom();
-    PostMessageW(hwnd, WM_NULL, 0, 0);
+    if (hwnd) PostMessageW(hwnd, WM_NULL, 0, 0);
     if (cmd) RunCommand(cmd, target);
     if (hwnd && d->collapsed) ScheduleCapsuleHide();
 }
@@ -2064,6 +2102,8 @@ void NoteWin::RunCommand(int cmd, int target)
     case CmdNewNote: g_app->CreateNote(this); return;
     case CmdDeleteNote: g_app->DeleteNote(this, true); return;
     case CmdTrash: g_app->ShowTrash(); return;
+    case CmdManage: g_app->ShowManage(); return;
+    case CmdHide: SetHidden(true); return; // 之后 this 的窗口没了，直接返回
     case CmdSettings: g_app->ShowSettings(); return;
     case CmdExit: g_app->Exit(); return;
     case CmdAdd: Expand(); BeginEdit(d->items.n); return;
@@ -2367,6 +2407,16 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
     }
     case WM_TIMER:
         if (w == TimerCaret) { caretOn = !caretOn; Render(); }
+        else if (w == TimerFlash)
+        {
+            if ((int)(GetTickCount() - flashUntil) >= 0)
+            {
+                KillTimer(hwnd, TimerFlash);
+                flashUntil = 0;
+                if (!g_app->peeking) EndPeek();
+            }
+            Render();
+        }
         else if (w == TimerHide) OnHideTimer();
         else if (w == TimerSlide)
         {

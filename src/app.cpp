@@ -81,7 +81,8 @@ NoteWin* App::OpenWindow(NoteData* n)
 {
     NoteWin* w = new NoteWin(n);
     notes.Push(w);
-    w->Create();
+    if (!n->hidden) w->Create(); // 隐藏的不建窗口
+    if (manageWnd) ManageWindowRefresh(manageWnd);
     return w;
 }
 
@@ -223,6 +224,13 @@ void App::ShowTrash()
     SetForegroundWindow(trashWnd);
 }
 
+void App::ShowManage()
+{
+    if (!manageWnd) manageWnd = ManageWindowCreate();
+    ShowWindow(manageWnd, SW_SHOW);
+    SetForegroundWindow(manageWnd);
+}
+
 void App::ShowSettings()
 {
     if (!settingsWnd) settingsWnd = SettingsWindowCreate();
@@ -236,16 +244,23 @@ void App::ShowSettings()
 void App::TogglePeek()
 {
     if (peeking) { EndPeek(); return; }
-    if (!notes.n) return;
+    NoteWin* last = nullptr;
+    for (int i = 0; i < notes.n; i++) if (notes[i]->hwnd) last = notes[i]; // 隐藏的便签不参与
+    if (!last) return;
     peeking = true;
-    for (int i = 0; i < notes.n; i++) notes[i]->BeginPeek();
-    SetForegroundWindow(notes.Last()->hwnd);
+    for (int i = 0; i < notes.n; i++) if (notes[i]->hwnd) notes[i]->BeginPeek();
+    SetForegroundWindow(last->hwnd);
 }
 
 void App::EndPeek()
 {
     peeking = false;
-    for (int i = 0; i < notes.n; i++) notes[i]->EndPeek();
+    for (int i = 0; i < notes.n; i++)
+    {
+        NoteWin* w = notes[i];
+        if (w->tempShown) { w->tempShown = false; w->Destroy(); } // 因提醒临时显示的隐藏便签：收回去
+        else if (w->hwnd) w->EndPeek();
+    }
 }
 
 void App::BringAllOnScreen()
@@ -300,7 +315,11 @@ void App::ShowNotice(const Str& title, const Str& text, NoteWin* w)
 // =====================================================================
 // 同步联动
 // =====================================================================
-void App::OnNoteSaved() { if (sync) SyncTouch(sync); }
+void App::OnNoteSaved()
+{
+    if (sync) SyncTouch(sync);
+    if (manageWnd) ManageWindowRefresh(manageWnd);
+}
 
 void App::OpenSyncedNote(NoteData* n)
 {
@@ -427,12 +446,13 @@ static void TrayRemove()
 
 static void TrayMenu(int sx, int sy)
 {
-    enum { CShow = 1, CNew, CBring, CTrash, CSettings, CExit };
+    enum { CShow = 1, CNew, CBring, CTrash, CSettings, CExit, CManage };
     Ui::Menu m;
-    m.Item(CShow, L"显示所有便签", 0xE7C4, g_app->settings.hotkeyEnabled ? g_app->settings.hotkey.c() : nullptr);
+    m.Item(CShow, L"便签提到最前", 0xE7C4, g_app->settings.hotkeyEnabled ? g_app->settings.hotkey.c() : nullptr);
     m.Item(CNew, L"新建便签", 0xE70B);
     m.Item(CBring, L"把便签拉回屏幕", 0xE7F4);
     m.Sep();
+    m.Item(CManage, L"便签管理", 0xE71D);
     m.Item(CTrash, L"回收站", 0xE7B8);
     m.Item(CSettings, L"设置", 0xE713);
     m.Sep();
@@ -453,6 +473,7 @@ static void TrayMenu(int sx, int sy)
     case CBring: g_app->BringAllOnScreen(); break;
     case CTrash: g_app->ShowTrash(); break;
     case CSettings: g_app->ShowSettings(); break;
+    case CManage: g_app->ShowManage(); break;
     case CExit: g_app->Exit(); break;
     }
 }
@@ -471,6 +492,7 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l)
         case NIN_BALLOONUSERCLICK:
             if (g_app->balloonNote && g_app->notes.Contains(g_app->balloonNote))
             {
+                if (!g_app->balloonNote->hwnd) g_app->balloonNote->ShowTemporarily(); // 隐藏着：临时显示
                 g_app->balloonNote->Expand();
                 if (!g_app->peeking) g_app->TogglePeek();
             }
@@ -509,6 +531,7 @@ void App::Exit()
     UnregisterHotKey(msgWnd, 1);
     TrayRemove();
     if (trashWnd) DestroyWindow(trashWnd);
+    if (manageWnd) DestroyWindow(manageWnd);
     if (settingsWnd) DestroyWindow(settingsWnd);
     if (g_changeNotif != INVALID_HANDLE_VALUE) FindCloseChangeNotification(g_changeNotif);
     PostQuitMessage(0);
@@ -600,6 +623,7 @@ extern "C" void __stdcall Start()
     else if (open.Eq(L"edit") && g_app->notes.n) g_app->notes[0]->BeginEdit(0);            // 调界面用
     else if (open.Eq(L"capsule") && g_app->notes.n) g_app->notes[0]->Collapse();
     else if (open.Eq(L"preview") && g_app->notes.n) g_app->notes[0]->DebugPreview();
+    else if (open.Eq(L"manage")) g_app->ShowManage();
     else if (open.Eq(L"reminder") && g_app->notes.n) g_app->notes[0]->DebugReminder(2);
     else if (open.Eq(L"hover") && g_app->notes.n) g_app->notes[0]->DebugHover(1, 2);
     else if (open.StartsWith(L"menu") && g_app->notes.n) g_app->notes[0]->DebugMenu((int)ParseInt(open.Sub(4), 0));
@@ -629,6 +653,7 @@ extern "C" void __stdcall Start()
             if (msg.message == WM_QUIT) { quit = true; break; }
             if (g_app->settingsWnd && !SettingsWindowWantsKeys(g_app->settingsWnd) && IsDialogMessageW(g_app->settingsWnd, &msg)) continue;
             if (g_app->trashWnd && IsDialogMessageW(g_app->trashWnd, &msg)) continue;
+            if (g_app->manageWnd && IsDialogMessageW(g_app->manageWnd, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

@@ -432,6 +432,33 @@ static void Phase1(const Str& server, const Str& key)
     if (z) { app->DeleteNote(z, false); Pump(200); }
 
     if (server.n) SyncTests(server, key);
+
+    // ---- 隐藏（便签管理）：只在这台电脑上，窗口销毁，提到最前时跳过 ----
+    app->CreateNoteFromContent(app->notes[0]->d->ContentJson(), L"（隐藏测试）");
+    NoteWin* hdn = nullptr;
+    for (int i = 0; i < app->notes.n; i++) if (app->notes[i]->d->title.EndsWith(L"（隐藏测试）")) hdn = app->notes[i];
+    Check(L"隐藏测试便签建好了", hdn && hdn->hwnd);
+    if (hdn)
+    {
+        hdn->SetHidden(true);
+        Str ft;
+        ReadFileText(Store::NotePath(hdn->d->id).c(), &ft);
+        Check(L"隐藏：窗口销毁、文件里记下", !hdn->hwnd && ft.Find(L"\"hidden\"") >= 0);
+        Check(L"隐藏状态不进同步的内容", hdn->d->ContentJson().Find(L"hidden") < 0);
+        app->TogglePeek();
+        Pump(100);
+        Check(L"提到最前跳过隐藏的便签", !hdn->hwnd);
+        app->EndPeek();
+        app->ShowManage();
+        Pump(200);
+        Check(L"便签管理窗口能打开", app->manageWnd != nullptr);
+        if (app->manageWnd) DestroyWindow(app->manageWnd);
+        Pump(50);
+        hdn->SetHidden(false);
+        Check(L"重新显示：窗口回来", hdn->hwnd != nullptr && !hdn->d->hidden);
+        hdn->SetHidden(true);
+        WriteAtomic(PathJoin(Store::Dir, L"hidden-id.txt").c(), hdn->d->id);
+    }
     WriteAtomic(PathJoin(Store::Dir, L"expected-notes.txt").c(), NoteFiles());
 }
 
@@ -452,6 +479,10 @@ static void Phase2()
     for (int k = 0; k < app->notes.n; k++)
         for (int i = 0; i < app->notes[k]->d->items.n; i++) if (app->notes[k]->d->items[i].reminded) reminded = true;
     Check(L"提醒状态保留", reminded);
+    Str hid;
+    ReadFileText(PathJoin(Store::Dir, L"hidden-id.txt").c(), &hid);
+    NoteWin* hw = app->Find(hid.Trim());
+    Check(L"重启后隐藏的便签还隐藏着（没有窗口）", hw && hw->d->hidden && !hw->hwnd);
 }
 
 void SelfTestRun(const Str& phase, const Str& outFile, const Str& server, const Str& key)

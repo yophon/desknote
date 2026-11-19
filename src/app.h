@@ -45,8 +45,9 @@ class NoteWin
 {
 public:
     NoteData* d;
-    HWND hwnd = nullptr;
+    HWND hwnd = nullptr;              // 隐藏着的便签没有窗口
     bool deleted = false;
+    bool tempShown = false;           // 隐藏的便签因为提醒被临时显示出来，结束「提到最前」时收回去
 
     explicit NoteWin(NoteData* data);
     ~NoteWin();
@@ -73,6 +74,9 @@ public:
     bool CanUndo() const { return undo.n > 0; }
     void ApplyMode();
     void SetMode(WinMode m);
+    void SetHidden(bool hidden);      // 便签管理里的显示 / 隐藏
+    void ShowTemporarily();
+    void Locate();                    // 便签管理里的「定位」：提到最前、描边闪一下
     float Scale() const;
 
     // 自测、调界面用
@@ -146,6 +150,7 @@ private:
     bool hover = false;
     int HitToolbar(float xDip, float yDip) const;
     bool sizing = false;      // 在系统的拖动/缩放循环里
+    DWORD flashUntil = 0;     // 定位时描边闪烁到什么时候
     bool userResizing = false; // 其中真的在拖边框缩放（收到过 WM_SIZING）
     bool menuChanged = false;
     int HitRow(float yDip) const;
@@ -240,7 +245,7 @@ struct App
     bool exiting = false;
     bool peeking = false;
     HWND msgWnd = nullptr;
-    HWND trashWnd = nullptr, settingsWnd = nullptr;
+    HWND trashWnd = nullptr, settingsWnd = nullptr, manageWnd = nullptr;
     NoteWin* balloonNote = nullptr;
     Syncer* sync = nullptr;
     HICON icon = nullptr, iconSmall = nullptr;
@@ -260,6 +265,7 @@ struct App
     int IndexOf(NoteWin* w) { return notes.IndexOf(w); }
     void ShowTrash();
     void ShowSettings();
+    void ShowManage();
     void TogglePeek();
     void EndPeek();
     void BringAllOnScreen();
@@ -280,6 +286,8 @@ extern App* g_app;
 extern HINSTANCE g_inst;
 
 // 对话框（dialogs.cpp）
+HWND ManageWindowCreate();
+void ManageWindowRefresh(HWND w);
 HWND TrashWindowCreate();
 void TrashWindowRefresh(HWND w);
 HWND SettingsWindowCreate();

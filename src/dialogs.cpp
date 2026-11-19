@@ -1624,6 +1624,546 @@ int ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time curren
     return d.result;
 }
 
+// =====================================================================
+// 便签管理：所有便签一览；显示 / 隐藏（隐藏只在这台电脑上，不同步）、定位、删除、新建；搜索标题和内容
+// =====================================================================
+static void DrawToggle(ID2D1RenderTarget* rt, D2D1_RECT_F tr, bool on, bool hot)
+{
+    const Ui::Theme& T = Ui::T;
+    float cy = (tr.top + tr.bottom) / 2;
+    if (on)
+    {
+        Ui::Fill(rt, tr, 10, hot ? (T.accent & 0x00FFFFFF) | 0xE6000000 : T.accent);
+        Ui::Circle(rt, tr.right - 10, cy, hot ? 7.f : 6.f, T.onAccent);
+    }
+    else
+    {
+        Ui::Fill(rt, tr, 10, hot ? T.subtleHover : T.toggleOffFill);
+        Ui::Stroke(rt, tr, 10, T.strong, 1);
+        Ui::Circle(rt, tr.left + 10, cy, hot ? 7.f : 6.f, T.text2);
+    }
+}
+
+static u32 Rgb(u32 rgb, float a) { return ((u32)(Clamp(a, 0.f, 1.f) * 255 + 0.5f) << 24) | (rgb & 0xFFFFFF); }
+
+// 便签文件的修改时间（本地时间）
+static bool NoteModified(const Str& id, SYSTEMTIME* st, u64* key)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(Store::NotePath(id).c(), GetFileExInfoStandard, &fa)) return false;
+    *key = ((u64)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+    FILETIME local;
+    FileTimeToLocalFileTime(&fa.ftLastWriteTime, &local);
+    FileTimeToSystemTime(&local, st);
+    return true;
+}
+
+static Str WhenText(const SYSTEMTIME& st)
+{
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    Time day = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+    Str s;
+    if (day == Today()) s = L"今天 ";
+    else if (day == Today() - TicksPerDay) s = L"昨天 ";
+    else
+    {
+        if (st.wYear != now.wYear) s.Int(st.wYear).Append(L"年");
+        s.Int(st.wMonth).Append(L"月").Int(st.wDay).Append(L"日");
+        return s;
+    }
+    s.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute);
+    return s;
+}
+
+static Str Lower(const Str& s)
+{
+    Str t = s;
+    if (t.n) CharLowerBuffW(t.p, (DWORD)t.n);
+    return t;
+}
+
+struct ManageWin
+{
+    HWND hwnd = nullptr;
+    int dpi = 96;
+    float S() const { return dpi / 96.f; }
+    HWND search = nullptr;
+    HFONT font = nullptr;
+    int editH = 0;
+    HBRUSH brushRest = nullptr, brushFocus = nullptr;
+    D2D1_RECT_F searchFrame = {};
+    struct Hit { int id; D2D1_RECT_F r; NoteWin* w; };
+    Vec<Hit> hits;              // 列表里的区域是内容坐标（要加滚动），顶栏是窗口坐标
+    int hover = 0, press = 0;
+    NoteWin* hoverNote = nullptr;
+    NoteWin* pressNote = nullptr;
+    NoteWin* expanded = nullptr; // 展开看条目的那张
+    bool tracking = false;
+    float scroll = 0, contentH = 0, listTop = 0;
+    enum { HNew = 1, HShowAll, HRow, HToggle, HLocate, HDelete };
+
+    void Invalidate() { InvalidateRect(hwnd, nullptr, FALSE); }
+    float ClientW() { RECT rc; GetClientRect(hwnd, &rc); return rc.right / S(); }
+    float ClientH() { RECT rc; GetClientRect(hwnd, &rc); return rc.bottom / S(); }
+    void ClampScroll() { scroll = Clamp(scroll, 0.f, Max(0.f, contentH - (ClientH() - listTop))); }
+    bool Alive(NoteWin* w) const { return w && g_app->notes.Contains(w); }
+
+    void Init()
+    {
+        brushRest = CreateSolidBrush(Ui::Ref(Ui::T.inputBg));
+        brushFocus = CreateSolidBrush(Ui::Ref(Ui::T.inputFocusBg));
+        search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 10, 10, hwnd, (HMENU)100, g_inst, nullptr);
+        Ui::AllowDarkControls(search);
+        SendMessageW(search, EM_SETCUEBANNER, TRUE, (LPARAM)L"搜索标题或内容");
+        MakeFont();
+    }
+    void MakeFont()
+    {
+        if (font) DeleteObject(font);
+        font = CreateFontW(-(int)(14 * S() + 0.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
+        HDC dc = GetDC(hwnd);
+        HGDIOBJ of = SelectObject(dc, font);
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        editH = tm.tmHeight;
+        SelectObject(dc, of);
+        ReleaseDC(hwnd, dc);
+        SendMessageW(search, WM_SETFONT, (WPARAM)font, TRUE);
+    }
+    Str Query()
+    {
+        int len = GetWindowTextLengthW(search);
+        Str s;
+        s.Reserve(len);
+        GetWindowTextW(search, s.p, len + 1);
+        s.n = WLen(s.p);
+        return Lower(s.Trim());
+    }
+
+    struct Entry { NoteWin* w; u64 key; SYSTEMTIME st; bool hasTime; };
+    // 按搜索过滤，按修改时间从新到旧
+    void Collect(Vec<Entry>& out)
+    {
+        Str q = Query();
+        for (int i = 0; i < g_app->notes.n; i++)
+        {
+            NoteWin* w = g_app->notes[i];
+            if (q.n)
+            {
+                bool hit = Lower(w->d->title).Find(q.c()) >= 0;
+                for (int k = 0; k < w->d->items.n && !hit; k++) if (Lower(w->d->items[k].text).Find(q.c()) >= 0) hit = true;
+                if (!hit) continue;
+            }
+            Entry e = { w, 0, {}, false };
+            e.hasTime = NoteModified(w->d->id, &e.st, &e.key);
+            int at = out.n;
+            while (at > 0 && out[at - 1].key < e.key) at--;
+            out.Insert(at, e);
+        }
+    }
+
+    void Build(ID2D1RenderTarget* rt)
+    {
+        hits.Clear();
+        const Ui::Theme& T = Ui::T;
+        float W = ClientW(), H = ClientH();
+        const float L = 24, R = W - 24;
+        int hiddenN = 0;
+        for (int i = 0; i < g_app->notes.n; i++) if (g_app->notes[i]->d->hidden) hiddenN++;
+
+        // ---- 顶栏 ----
+        float y = 18;
+        Str newText(L"新建便签"), allText(L"全部显示");
+        float nw = Ui::Measure(newText, 14, 400) + 28, aw = Ui::Measure(allText, 14, 400) + 24;
+        D2D1_RECT_F nb = D2D1::RectF(R - nw, y, R, y + 32), ab = D2D1::RectF(nb.left - 8 - aw, y, nb.left - 8, y + 32);
+        Hit h1 = { HNew, nb, nullptr };
+        hits.Push(h1);
+        if (hiddenN) { Hit h2 = { HShowAll, ab, nullptr }; hits.Push(h2); }
+        if (rt)
+        {
+            float tw = Ui::Text(rt, Str(L"便签管理"), D2D1::RectF(L, y, (hiddenN ? ab.left : nb.left) - 16, y + 32), 20, 600, T.text);
+            Str count;
+            count.Int(g_app->notes.n).Append(L" 张");
+            if (hiddenN) { count.Append(L" · "); count.Int(hiddenN).Append(L" 张隐藏"); }
+            Ui::Text(rt, count, D2D1::RectF(L + tw + 10, y + 4, (hiddenN ? ab.left : nb.left) - 16, y + 32), 14, 400, T.text2);
+            DrawBtn(rt, nb, newText, 0, 1, hover == HNew, press == HNew, T.winBg);
+            if (hiddenN) DrawBtn(rt, ab, allText, 0, 0, hover == HShowAll, press == HShowAll, T.winBg);
+        }
+        y += 32 + 14;
+        // 搜索框
+        searchFrame = D2D1::RectF(L, y, R, y + 34);
+        if (rt)
+        {
+            bool f = GetFocus() == search;
+            Ui::Fill(rt, searchFrame, 4, f ? T.inputFocusBg : T.inputBg);
+            Ui::Stroke(rt, searchFrame, 4, T.ctrlBorder, 1);
+            if (f) Ui::Fill(rt, D2D1::RectF(searchFrame.left + 1, searchFrame.bottom - 2, searchFrame.right - 1, searchFrame.bottom), 1, T.accent);
+            else Ui::Line(rt, searchFrame.left + 3, searchFrame.bottom - 0.5f, searchFrame.right - 3, searchFrame.bottom - 0.5f, T.strong, 1);
+            Ui::Icon(rt, 0xE721, searchFrame.left + 18, (searchFrame.top + searchFrame.bottom) / 2, 14, T.text2);
+        }
+        y += 34 + 14;
+        listTop = y;
+
+        // ---- 列表 ----
+        Vec<Entry> list;
+        Collect(list);
+        if (!list.n)
+        {
+            if (rt)
+            {
+                float cy = listTop + (H - listTop) * 0.35f;
+                bool none = g_app->notes.n == 0;
+                Ui::Icon(rt, none ? 0xE70B : 0xE721, W / 2, cy - 26, 36, T.text3);
+                Ui::Text(rt, Str(none ? L"还没有便签" : L"没有找到"), D2D1::RectF(L, cy + 4, R, cy + 28), 14, 400, T.text2, Ui::Center);
+            }
+            contentH = 0;
+            return;
+        }
+        if (rt)
+        {
+            rt->PushAxisAlignedClip(D2D1::RectF(0, listTop, W, H), D2D1_ANTIALIAS_MODE_ALIASED);
+            rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -scroll));
+        }
+        float ly = listTop;
+        const float rowH = 64, lineH = 22;
+        const int maxLines = 10;
+        for (int i = 0; i < list.n; i++)
+        {
+            NoteWin* w = list[i].w;
+            NoteData* d = w->d;
+            bool hidden = d->hidden;
+            bool open = expanded == w;
+            int shown = open ? Min(d->items.n, maxLines) : 0;
+            float extra = open ? 8 + Max(1, shown + (d->items.n > maxLines ? 1 : 0)) * lineH + 10 : 0;
+            D2D1_RECT_F card = D2D1::RectF(L, ly, R, ly + rowH + extra);
+            float cy = ly + rowH / 2;
+            D2D1_RECT_F del = D2D1::RectF(R - 12 - 32, cy - 16, R - 12, cy + 16);
+            D2D1_RECT_F loc = D2D1::RectF(del.left - 4 - 32, cy - 16, del.left - 4, cy + 16);
+            D2D1_RECT_F tog = D2D1::RectF(loc.left - 14 - 40, cy - 10, loc.left - 14, cy + 10);
+            D2D1_RECT_F togHit = D2D1::RectF(tog.left - 40, cy - 16, tog.right + 4, cy + 16);
+            Hit hr = { HRow, card, w }, ht = { HToggle, togHit, w }, hd = { HDelete, del, w };
+            hits.Push(hr);
+            hits.Push(ht);
+            if (!hidden) { Hit hl = { HLocate, loc, w }; hits.Push(hl); }
+            hits.Push(hd);
+            if (rt && ly - scroll < H && card.bottom - scroll > listTop)
+            {
+                bool rowHot = hoverNote == w;
+                Ui::Fill(rt, card, 4, rowHot ? Ui::Solid(T.subtleHover, T.cardBg) : T.cardBg);
+                Ui::Stroke(rt, card, 4, T.cardBorder, 1);
+                // 色块：便签自己的底色，上面用字色写 Aa
+                float a = hidden ? 0.4f : 1.f;
+                D2D1_RECT_F sw = D2D1::RectF(L + 14, cy - 18, L + 14 + 36, cy + 18);
+                Ui::Fill(rt, sw, 8, Rgb(d->bgColor, a));
+                Ui::Stroke(rt, sw, 8, T.ctrlBorder, 1);
+                Ui::Text(rt, Str(L"Aa"), sw, 13, 600, Rgb(d->textColor, a), Ui::Center);
+                float textL = sw.right + 14, textR = togHit.left - 8;
+                Ui::Text(rt, d->title, D2D1::RectF(textL, cy - 19, textR, cy + 1), 14, hidden ? 400 : 600, hidden ? T.text2 : T.text);
+                int undone = 0;
+                for (int k = 0; k < d->items.n; k++) if (!d->checkboxes || !d->items[k].done) undone++;
+                Str sub;
+                if (hidden) sub = L"已隐藏 · ";
+                if (d->checkboxes) { sub.Int(undone).Append(L" 条未完成 · "); }
+                sub.Append(L"共 ").Int(d->items.n).Append(L" 条 · ");
+                sub += d->mode == ModeTopmost ? L"置顶" : d->mode == ModeNormal ? L"普通窗口" : L"置底";
+                if (d->collapsed) sub += L"（胶囊）";
+                if (list[i].hasTime) { sub += L" · "; sub += WhenText(list[i].st); }
+                Ui::Text(rt, sub, D2D1::RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
+                Ui::Text(rt, Str(L"显示"), D2D1::RectF(tog.left - 40, cy - 10, tog.left - 8, cy + 10), 12, 400, T.text2, Ui::Right);
+                DrawToggle(rt, tog, !hidden, hover == HToggle && hoverNote == w);
+                if (hidden) Ui::Icon(rt, 0xE81D, (loc.left + loc.right) / 2, cy, 14, T.disabled);
+                else DrawBtn(rt, loc, Str(), 0xE81D, 2, hover == HLocate && hoverNote == w, press == HLocate && pressNote == w, T.cardBg);
+                bool hdel = hover == HDelete && hoverNote == w;
+                if (hdel) Ui::Fill(rt, del, 4, press == HDelete ? T.subtlePress : T.subtleHover);
+                Ui::Icon(rt, 0xE74D, (del.left + del.right) / 2, cy, 14, hdel ? T.critical : T.text2);
+                // 展开：条目预览
+                if (open)
+                {
+                    float py = ly + rowH + 4;
+                    Ui::Line(rt, L + 14, py - 0.5f, R - 14, py - 0.5f, T.divider, 1);
+                    py += 4;
+                    if (!d->items.n)
+                        Ui::Text(rt, Str(L"（还没有条目）"), D2D1::RectF(textL, py, R - 16, py + lineH), 13, 400, T.text3);
+                    for (int k = 0; k < shown; k++)
+                    {
+                        const NoteItem& it = d->items[k];
+                        bool done = d->checkboxes && it.done;
+                        float icy = py + lineH / 2;
+                        if (d->checkboxes)
+                        {
+                            D2D1_RECT_F cb = D2D1::RectF(textL, icy - 6, textL + 12, icy + 6);
+                            if (done) { Ui::Fill(rt, cb, 3, T.text3); Ui::Icon(rt, 0xE73E, textL + 6, icy, 9, T.cardBg); }
+                            else Ui::Stroke(rt, cb, 3, T.text3, 1.2f);
+                        }
+                        else Ui::Circle(rt, textL + 6, icy, 2.5f, T.text3);
+                        Str t = it.text.Replace(L"\r", L"").Replace(L"\n", L" ");
+                        Ui::Text(rt, t, D2D1::RectF(textL + 20, py, R - 16, py + lineH), 13, 400, done ? T.text3 : T.text);
+                        py += lineH;
+                    }
+                    if (d->items.n > maxLines)
+                    {
+                        Str more(L"…还有 ");
+                        more.Int(d->items.n - maxLines).Append(L" 条");
+                        Ui::Text(rt, more, D2D1::RectF(textL + 20, py, R - 16, py + lineH), 12, 400, T.text3);
+                    }
+                }
+            }
+            ly = card.bottom + 4;
+        }
+        ly += 20;
+        contentH = ly - listTop;
+        if (rt)
+        {
+            rt->SetTransform(D2D1::Matrix3x2F::Identity());
+            rt->PopAxisAlignedClip();
+            float viewH = H - listTop;
+            if (contentH > viewH + 1)
+            {
+                float th = Max(24.f, viewH * viewH / contentH);
+                float ty = listTop + (viewH - th) * Clamp(scroll / (contentH - viewH), 0.f, 1.f);
+                Ui::Fill(rt, D2D1::RectF(W - 7, ty + 2, W - 4, ty + th - 2), 1.5f, T.text3);
+            }
+        }
+    }
+
+    void PlaceEdit()
+    {
+        float s = S();
+        int x = (int)((searchFrame.left + 34) * s), w = (int)((searchFrame.right - 10) * s) - x;
+        int cy = (int)((searchFrame.top + searchFrame.bottom) / 2 * s);
+        RECT cur;
+        GetWindowRect(search, &cur);
+        MapWindowPoints(nullptr, hwnd, (POINT*)&cur, 2);
+        if (cur.left != x || cur.top != cy - editH / 2 || cur.right - cur.left != w)
+            MoveWindow(search, x, cy - editH / 2, w, editH, TRUE);
+    }
+
+    void Paint()
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        Canvas c;
+        if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
+        {
+            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
+            c.rt->Clear(&bg);
+            Build(c.rt);
+        }
+        c.EndBlt(dc);
+        EndPaint(hwnd, &ps);
+        PlaceEdit();
+    }
+
+    int HitAt(int px, int py, NoteWin** w)
+    {
+        float x = px / S(), y = py / S();
+        *w = nullptr;
+        for (int i = hits.n - 1; i >= 0; i--)
+        {
+            const Hit& h = hits[i];
+            float yy = h.w ? y + scroll : y;
+            if (h.w && y < listTop) continue;
+            if (x >= h.r.left && x < h.r.right && yy >= h.r.top && yy < h.r.bottom) { *w = h.w; return h.id; }
+        }
+        return 0;
+    }
+
+    void Activate(int id, NoteWin* w)
+    {
+        if (id == HNew) { g_app->CreateNote(nullptr); return; }
+        if (id == HShowAll)
+        {
+            for (int i = 0; i < g_app->notes.n; i++) if (g_app->notes[i]->d->hidden) g_app->notes[i]->SetHidden(false);
+            return;
+        }
+        if (!Alive(w)) return;
+        switch (id)
+        {
+        case HRow: expanded = expanded == w ? nullptr : w; Refresh(); break;
+        case HToggle: w->SetHidden(!w->d->hidden); break;
+        case HLocate: w->Locate(); break;
+        case HDelete: g_app->DeleteNote(w, true); break;
+        }
+    }
+
+    void Refresh()
+    {
+        if (!Alive(expanded)) expanded = nullptr;
+        if (!Alive(hoverNote)) { hoverNote = nullptr; hover = 0; }
+        Build(nullptr);
+        ClampScroll();
+        Invalidate();
+    }
+
+    static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
+    {
+        ManageWin* self = (ManageWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
+        if (m == WM_NCCREATE)
+        {
+            self = (ManageWin*)((CREATESTRUCTW*)l)->lpCreateParams;
+            self->hwnd = h;
+            SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
+        }
+        if (!self) return DefWindowProcW(h, m, w, l);
+        switch (m)
+        {
+        case WM_PAINT: self->Paint(); return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_SIZE: self->Build(nullptr); self->ClampScroll(); self->PlaceEdit(); self->Invalidate(); return 0;
+        case WM_GETMINMAXINFO:
+            ((MINMAXINFO*)l)->ptMinTrackSize.x = (int)(480 * self->S());
+            ((MINMAXINFO*)l)->ptMinTrackSize.y = (int)(360 * self->S());
+            return 0;
+        case WM_CTLCOLOREDIT:
+        {
+            bool f = GetFocus() == (HWND)l;
+            u32 bg = f ? Ui::T.inputFocusBg : Ui::T.inputBg;
+            SetTextColor((HDC)w, Ui::Ref(Ui::Solid(Ui::T.text, bg)));
+            SetBkColor((HDC)w, Ui::Ref(bg));
+            return (LRESULT)(f ? self->brushFocus : self->brushRest);
+        }
+        case WM_MOUSEMOVE:
+        {
+            if (!self->tracking)
+            {
+                TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
+                TrackMouseEvent(&t);
+                self->tracking = true;
+            }
+            NoteWin* n;
+            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n);
+            if (id != self->hover || n != self->hoverNote) { self->hover = id; self->hoverNote = n; self->Invalidate(); }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            self->tracking = false;
+            self->hover = 0;
+            self->hoverNote = nullptr;
+            self->Invalidate();
+            return 0;
+        case WM_LBUTTONDOWN:
+        {
+            if (GetFocus() != h) SetFocus(h); // 点空白处：搜索框失去焦点
+            self->press = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &self->pressNote);
+            if (self->press) SetCapture(h);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        {
+            int p = self->press;
+            NoteWin* pn = self->pressNote;
+            self->press = 0;
+            self->pressNote = nullptr;
+            if (GetCapture() == h) ReleaseCapture();
+            NoteWin* n;
+            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n);
+            if (p && id == p && n == pn) self->Activate(p, n);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_LBUTTONDBLCLK:
+        {
+            // 双击一行：显示出来并定位
+            NoteWin* n;
+            if (self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n) == HRow && self->Alive(n))
+            {
+                if (n->d->hidden) n->SetHidden(false);
+                n->Locate();
+            }
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+        {
+            float old = self->scroll;
+            self->scroll -= GET_WHEEL_DELTA_WPARAM(w) / 120.f * 66;
+            self->ClampScroll();
+            if (self->scroll != old) self->Invalidate();
+            return 0;
+        }
+        case WM_COMMAND:
+        {
+            int id = LOWORD(w), code = HIWORD(w);
+            if (id == 100 && code == EN_CHANGE) { self->scroll = 0; self->Refresh(); return 0; }
+            if (id == 100 && (code == EN_SETFOCUS || code == EN_KILLFOCUS)) { self->Invalidate(); InvalidateRect((HWND)l, nullptr, TRUE); return 0; }
+            if (id == IDCANCEL)
+            {
+                // Esc：搜索框里有字先清空，没有就关窗口
+                if (GetWindowTextLengthW(self->search) > 0) SetWindowTextW(self->search, L"");
+                else DestroyWindow(h);
+            }
+            return 0;
+        }
+        case WM_DPICHANGED:
+        {
+            self->dpi = HIWORD(w);
+            self->MakeFont();
+            RECT* rc = (RECT*)l;
+            SetWindowPos(h, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            self->Invalidate();
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+            if (l && WEq((const wchar_t*)l, L"ImmersiveColorSet"))
+            {
+                Ui::LoadTheme();
+                ApplyFrameTheme(h);
+                DeleteObject(self->brushRest);
+                DeleteObject(self->brushFocus);
+                self->brushRest = CreateSolidBrush(Ui::Ref(Ui::T.inputBg));
+                self->brushFocus = CreateSolidBrush(Ui::Ref(Ui::T.inputFocusBg));
+                Ui::AllowDarkControls(self->search);
+                self->Invalidate();
+            }
+            break;
+        case WM_CLOSE: DestroyWindow(h); return 0;
+        case WM_DESTROY:
+            g_app->manageWnd = nullptr;
+            SetWindowLongPtrW(h, GWLP_USERDATA, 0);
+            if (self->font) DeleteObject(self->font);
+            if (self->brushRest) DeleteObject(self->brushRest);
+            if (self->brushFocus) DeleteObject(self->brushFocus);
+            delete self;
+            return 0;
+        }
+        return DefWindowProcW(h, m, w, l);
+    }
+};
+
+HWND ManageWindowCreate()
+{
+    Ui::LoadTheme();
+    ManageWin* d = new ManageWin();
+    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"DeskNoteManage", L"DeskNote 便签管理", (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, g_inst, d);
+    d->dpi = GetDpiForWindow(h);
+    SetIcons(h);
+    ApplyFrameTheme(h);
+    d->Init();
+    POINT p;
+    GetCursorPos(&p);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
+    float S = d->S();
+    int maxH = (int)((mi.rcWork.bottom - mi.rcWork.top) * 0.85f);
+    RECT r = { 0, 0, (int)(640 * S), Min((int)(600 * S), maxH) };
+    AdjustWindowRectExForDpi(&r, GetWindowLongW(h, GWL_STYLE), FALSE, GetWindowLongW(h, GWL_EXSTYLE), d->dpi);
+    int w = r.right - r.left, ht = r.bottom - r.top;
+    SetWindowPos(h, nullptr, (mi.rcWork.left + mi.rcWork.right - w) / 2, (mi.rcWork.top + mi.rcWork.bottom - ht) / 2, w, ht, SWP_NOZORDER | SWP_NOACTIVATE);
+    d->Build(nullptr);
+    d->PlaceEdit();
+    return h;
+}
+
+void ManageWindowRefresh(HWND w)
+{
+    ManageWin* d = (ManageWin*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    if (d) d->Refresh();
+}
+
 void RegisterDialogClasses()
 {
     WNDCLASSW wc = {};
@@ -1634,5 +2174,6 @@ void RegisterDialogClasses()
     wc.hbrBackground = nullptr;
     wc.lpfnWndProc = SettingsWin::Proc; wc.lpszClassName = L"DeskNoteSettings"; RegisterClassW(&wc);
     wc.lpfnWndProc = TrashWin::Proc; wc.lpszClassName = L"DeskNoteTrash"; RegisterClassW(&wc);
+    wc.lpfnWndProc = ManageWin::Proc; wc.lpszClassName = L"DeskNoteManage"; RegisterClassW(&wc);
     wc.lpfnWndProc = ReminderWin::Proc; wc.lpszClassName = L"DeskNoteReminder"; RegisterClassW(&wc);
 }
