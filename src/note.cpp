@@ -82,7 +82,7 @@ static float LayoutWidth(IDWriteTextLayout* l)
 static float R1(float v) { return (float)(int)(v * 10 + 0.5f) / 10; }
 static float R0(float v) { return (float)(int)(v + 0.5f); }
 
-// 尺寸（和 WPF 版一致，单位 DIP）
+// 尺寸（单位 DIP，大多跟着字号走）
 static float TitleSize(const NoteData* d) { return R1((float)d->fontSize * 1.25f); }
 static float LineH(const NoteData* d) { return R0((float)d->fontSize * 1.45f); }
 static float CheckSize(const NoteData* d) { return R0((float)d->fontSize * 0.95f); }

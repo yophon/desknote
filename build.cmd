@@ -1,12 +1,17 @@
 @echo off
-rem Build with the built-in .NET Framework 4 compiler (no SDK needed)
-rem Icon: powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-icon.ps1 DeskNote.ico
+rem DeskNote: C-style C++ without the C runtime, Direct2D + DirectWrite.
+rem Usage: build.cmd [output.exe]
+setlocal
 set OUT=%~1
 if "%OUT%"=="" set OUT=%~dp0DeskNote.exe
-set FW=C:\Windows\Microsoft.NET\Framework64\v4.0.30319
-"%FW%\csc.exe" /nologo /target:winexe /optimize+ /out:"%OUT%" ^
-  /win32icon:"%~dp0DeskNote.ico" /win32manifest:"%~dp0app.manifest" ^
-  /resource:"%~dp0DeskNote.ico",DeskNote.ico ^
-  /r:"%FW%\WPF\PresentationFramework.dll" /r:"%FW%\WPF\PresentationCore.dll" /r:"%FW%\WPF\WindowsBase.dll" ^
-  /r:System.Xaml.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:System.Security.dll ^
-  "%~dp0src\*.cs"
+set VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe
+for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSDIR=%%i
+if "%VSDIR%"=="" (echo Visual Studio C++ build tools not found & exit /b 1)
+call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
+set OBJ=%TEMP%\desknote-obj
+if exist "%OBJ%" rmdir /s /q "%OBJ%"
+mkdir "%OBJ%"
+rc /nologo /fo "%OBJ%\DeskNote.res" "%~dp0DeskNote.rc" || exit /b 1
+cl /nologo /c /utf-8 /O1 /Os /Oi /GS- /GR- /EHs-c- /Zc:threadSafeInit- /W3 /wd4244 /wd4267 /DUNICODE /D_UNICODE /Fo"%OBJ%\\" "%~dp0src\*.cpp" || exit /b 1
+link /nologo /NODEFAULTLIB /ENTRY:Start /SUBSYSTEM:WINDOWS /MANIFEST:NO /OPT:REF /OPT:ICF /OUT:"%OUT%" "%OBJ%\*.obj" "%OBJ%\DeskNote.res" kernel32.lib user32.lib gdi32.lib shell32.lib comctl32.lib comdlg32.lib advapi32.lib crypt32.lib bcrypt.lib winhttp.lib d2d1.lib dwrite.lib ole32.lib uxtheme.lib dwmapi.lib imm32.lib || exit /b 1
+echo built %OUT%
