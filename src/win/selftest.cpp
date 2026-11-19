@@ -2,6 +2,7 @@
 // 在真实的程序对象上跑一遍常用操作，结果逐行写进结果文件（PASS/FAIL），跑完自动退出。
 // 内存诊断：--data <目录> --memdiag <结果文件>
 #include "app.h"
+#include "window_win.h"
 #include <psapi.h>
 
 JVal* SyncTestCall(const Str& server, const Str& key, const wchar_t* tool, JVal* args);
@@ -303,7 +304,7 @@ static void Phase1(const Str& server, const Str& key)
 
     // ---- 拖着挪位置不改大小，拖边框才改（跨缩放不同的屏拖动曾经越拖越大）----
     {
-        HWND h = a->hwnd;
+        HWND h = Wnd::H(a->win);
         float S = GetDpiForWindow(h) / 96.f;
         double w0 = a->d->width, h0 = a->d->height;
         RECT r;
@@ -437,17 +438,17 @@ static void Phase1(const Str& server, const Str& key)
     app->CreateNoteFromContent(app->notes[0]->d->ContentJson(), L"（隐藏测试）");
     NoteWin* hdn = nullptr;
     for (int i = 0; i < app->notes.n; i++) if (app->notes[i]->d->title.EndsWith(L"（隐藏测试）")) hdn = app->notes[i];
-    Check(L"隐藏测试便签建好了", hdn && hdn->hwnd);
+    Check(L"隐藏测试便签建好了", hdn && hdn->win);
     if (hdn)
     {
         hdn->SetHidden(true);
         Str ft;
         ReadFileText(Store::NotePath(hdn->d->id).c(), &ft);
-        Check(L"隐藏：窗口销毁、文件里记下", !hdn->hwnd && ft.Find(L"\"hidden\"") >= 0);
+        Check(L"隐藏：窗口销毁、文件里记下", !hdn->win && ft.Find(L"\"hidden\"") >= 0);
         Check(L"隐藏状态不进同步的内容", hdn->d->ContentJson().Find(L"hidden") < 0);
         app->TogglePeek();
         Pump(100);
-        Check(L"提到最前跳过隐藏的便签", !hdn->hwnd);
+        Check(L"提到最前跳过隐藏的便签", !hdn->win);
         app->EndPeek();
         app->ShowManage();
         Pump(200);
@@ -460,9 +461,9 @@ static void Phase1(const Str& server, const Str& key)
         hdn->Collapse();
         Str ft2;
         ReadFileText(Store::NotePath(hdn->d->id).c(), &ft2);
-        Check(L"隐藏着改窗口模式和折叠：记下来", !hdn->hwnd && hdn->d->mode == ModeTopmost && hdn->d->collapsed && ft2.Find(L"topmost") >= 0);
+        Check(L"隐藏着改窗口模式和折叠：记下来", !hdn->win && hdn->d->mode == ModeTopmost && hdn->d->collapsed && ft2.Find(L"topmost") >= 0);
         hdn->SetHidden(false);
-        Check(L"重新显示：窗口回来", hdn->hwnd != nullptr && !hdn->d->hidden);
+        Check(L"重新显示：窗口回来", hdn->win != nullptr && !hdn->d->hidden);
         Check(L"重新显示：按改过的设置（胶囊）", hdn->d->collapsed && hdn->d->mode == ModeTopmost);
         hdn->Expand();
         hdn->SetMode(oldMode);
@@ -492,7 +493,7 @@ static void Phase2()
     Str hid;
     ReadFileText(PathJoin(Store::Dir, L"hidden-id.txt").c(), &hid);
     NoteWin* hw = app->Find(hid.Trim());
-    Check(L"重启后隐藏的便签还隐藏着（没有窗口）", hw && hw->d->hidden && !hw->hwnd);
+    Check(L"重启后隐藏的便签还隐藏着（没有窗口）", hw && hw->d->hidden && !hw->win);
 }
 
 void SelfTestRun(const Str& phase, const Str& outFile, const Str& server, const Str& key)

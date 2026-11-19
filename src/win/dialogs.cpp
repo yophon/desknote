@@ -1260,7 +1260,7 @@ struct ReminderWin : WinHandler
     }
 };
 
-int ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result)
+int ReminderDialog(void* owner, const Str& itemText, bool hasCurrent, Time current, Time* result)
 {
     ReminderWin d;
     WinDesc desc;

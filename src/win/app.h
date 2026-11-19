@@ -29,11 +29,13 @@ struct UndoStep
 
 struct RowInfo { int index; float top, bottom, textLeft, chipLeft; }; // chipLeft：提醒标签左边，0 = 没有
 
-class NoteWin
+struct NotePreview;
+
+class NoteWin : public WinHandler
 {
 public:
     NoteData* d;
-    HWND hwnd = nullptr;              // 隐藏着的便签没有窗口
+    Window* win = nullptr;            // 隐藏着的便签没有窗口
     bool deleted = false;
     bool tempShown = false;           // 隐藏的便签因为提醒被临时显示出来，结束「提到最前」时收回去
 
@@ -65,12 +67,12 @@ public:
     void SetHidden(bool hidden);      // 便签管理里的显示 / 隐藏
     void ShowTemporarily();
     void Locate();                    // 便签管理里的「定位」：提到最前、描边闪一下
-    void ShowSettingsMenu(int sx, int sy, HWND owner); // 便签管理里的「设置」
+    void ShowSettingsMenu(int sx, int sy, void* owner); // 便签管理里的「设置」；owner：平台的窗口句柄
     void AddStyleItems(Ui::Menu& m);
     float Scale() const;
 
     // 自测、调界面用
-    void DebugPreview() { Collapse(); ShowPreview(); KillTimer(hwnd, 1); }
+    void DebugPreview() { Collapse(); ShowPreview(); Wnd::KillTimer(win, 1); }
     void DebugMenu(int sub);
     void DebugReminder(int i) { EditReminder(i); }
     static bool debugNoFocus; // 调界面用：进入编辑时不抢前台和键盘焦点（截图时别吃掉用户正在打的字）
@@ -91,12 +93,18 @@ public:
     void TestSetRemind(int index, Time t);
 
     static const int NotEditing = -1, TitleIndex = -2;
-    static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-    static LRESULT CALLBACK PreviewProc(HWND, UINT, WPARAM, LPARAM);
+    // 窗口事件（window.h）
+    void Paint(Window*, Painter*, float, float) override {}
+    bool OnEvent(Window* w, const Event& e) override;
+    int CursorAt(Window* w, float x, float y) override;
+    bool KeepAtBottom(Window* w) override;
+    bool KeepSizeOnMove(Window* w, float* width, float* height) override;
+    bool MinSize(Window* w, float* width, float* height) override;
+    bool WantsIme(Window* w) override { (void)w; return Editing(); }
 
 private:
-    friend struct NotePainter;
-    LRESULT Handle(UINT m, WPARAM w, LPARAM l);
+    friend struct NotePreview;
+    bool OnPreviewEvent(const Event& e);
 
     // 编辑
     int editIndex = NotEditing;
@@ -124,11 +132,10 @@ private:
     void EditCopy(bool cut);
     void EditPaste();
     void EditSelectWord(int pos);
-    bool EditKey(WPARAM vk);
+    bool EditKey(int vk, int mods);
     void EditChar(wchar_t c);
     void EditUpdated();
     void UpdateImePos();
-    bool EditIme(UINT m, WPARAM w, LPARAM l, LRESULT* r);
     void EditFinishIme(bool cancel);
     void EditContextMenu(int sx, int sy);
 
@@ -139,12 +146,10 @@ private:
     int hoverBtn = 0, hoverRow = -1;
     bool hover = false;
     int HitToolbar(float xDip, float yDip) const;
-    bool sizing = false;      // 在系统的拖动/缩放循环里
-    DWORD flashUntil = 0;     // 定位时描边闪烁到什么时候
-    bool userResizing = false; // 其中真的在拖边框缩放（收到过 WM_SIZING）
+    u64 flashUntil = 0;       // 定位时描边闪烁到什么时候
     bool menuChanged = false;
     int HitRow(float yDip) const;
-    int HitEdge(int x, int y) const;
+    int HitEdge(float x, float y) const; // 窗口 DIP；返回哪条边（DragResize 的编号），0 = 不在边上
 
     // 拖动排序
     int dragIndex = -1;
@@ -168,29 +173,28 @@ private:
     void MoveItem(int from, int to);
 
     // 鼠标、菜单
-    void OnLButtonDown(int x, int y, bool dbl);
+    void OnLButtonDown(float x, float y, bool dbl, int mods); // 窗口 DIP
     void OnContextMenu(int x, int y);
     void RunCommand(int cmd, int target);
-    bool TryOpenLink(int x, int y);
+    bool TryOpenLink(float x, float y); // 窗口 DIP
     void EditReminder(int index);
     void PickColor(bool background);
 
     // 窗口模式、置顶
     bool peeking = false;
-    int taskbarCreatedMsg = 0;
-    void AttachToDesktop();
     void SendToBottom();
     void RestorePosition();
     void PlaceDefault();
-    RECT WorkAreaPx() const;
+    RectI WorkAreaPx() const;
 
     // 胶囊
     bool capHidden = false, sliding = false;
     int dockedX = 0, dockedY = 0;
     bool dockL = false, dockR = false, dockT = false, dockB = false;
     int slideFromX = 0, slideFromY = 0, slideToX = 0, slideToY = 0;
-    DWORD slideStart = 0;
-    HWND preview = nullptr;
+    u64 slideStart = 0;
+    Window* preview = nullptr;
+    NotePreview* previewHandler = nullptr;
     bool previewHover = false;
     void EnterCollapsed();
     void SnapCapsule();
@@ -203,7 +207,6 @@ private:
     void RenderPreview();
     void ResizeTo(int w, int h);
 
-    void PaintTo(HDC mem, int pw, int ph);
 };
 
 // ---------------------------------------------------------------------
@@ -285,7 +288,7 @@ Window* TrashWindowCreate();
 void TrashWindowRefresh(Window* w);
 Window* SettingsWindowCreate();
 void SettingsWindowSyncStatus(Window* w);
-int ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result); // 0 取消，1 设定，2 移除
+int ReminderDialog(void* owner, const Str& itemText, bool hasCurrent, Time current, Time* result); // 0 取消，1 设定，2 移除
 bool HotkeyParse(const Str& s, int* mods, int* vk); // 修饰键是 Mod*，按键是 Key*
 Str HotkeyFormat(int mods, int vk);
 

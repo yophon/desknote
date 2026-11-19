@@ -43,6 +43,14 @@ enum EvType
     EvFieldFocus,   // field 得到焦点
     EvFieldBlur,    // field 失去焦点
     EvSubmit,       // 在输入框里按了回车（field 是当时有焦点的输入框，可能为空）
+    EvCaptureLost,  // 鼠标捕获被拿走了
+    EvAppActivate,  // button：1 本程序到了前台，0 别的程序到了前台
+    EvMoveStart,    // 开始交给系统拖动 / 改大小
+    EvMoveEnd,      // 拖完了
+    EvUserResize,   // 用户拖边框改了大小：pw × ph 物理像素
+    EvImeStart,     // 输入法开始组字
+    EvImeUpdate,    // 输入法：hasResult 时 imeResult 是上屏的字；hasComp 时 imeComp 是正在组的字、imeCursor 是组字里的光标
+    EvImeEnd,       // 组字结束
 };
 
 struct Event
@@ -55,6 +63,10 @@ struct Event
     float wheel = 0;
     int timer = 0;
     TextField* field = nullptr;
+    int pw = 0, ph = 0;
+    bool hasResult = false, hasComp = false;
+    Str imeResult, imeComp;
+    int imeCursor = 0;
 };
 
 // 窗口内容和事件由界面代码实现
@@ -62,6 +74,12 @@ struct WinHandler
 {
     virtual void Paint(Window* w, Painter* p, float width, float height) = 0;
     virtual bool OnEvent(Window* w, const Event& e) = 0;
+    // 平台需要时来问（都有默认答案）
+    virtual int CursorAt(Window* w, float x, float y) { (void)w; (void)x; (void)y; return 0; } // CursorShape
+    virtual bool KeepAtBottom(Window* w) { (void)w; return false; }       // 系统调整前后次序时压到最下面
+    virtual bool KeepSizeOnMove(Window* w, float* width, float* height) { (void)w; (void)width; (void)height; return false; } // 只是拖动（没改大小）时保持这个大小（DIP）
+    virtual bool MinSize(Window* w, float* width, float* height) { (void)w; (void)width; (void)height; return false; } // 拖边框最小到多大（DIP）
+    virtual bool WantsIme(Window* w) { (void)w; return false; }           // 自己画输入法组字（正在编辑）
 };
 
 struct WinDesc
@@ -99,6 +117,7 @@ namespace Wnd
     void ClientSize(Window* w, float* width, float* height);
     RectI ScreenBounds(Window* w);            // 整个窗口在屏幕上的位置（物理像素）
     PointI ToScreen(Window* w, float x, float y); // 客户区 DIP -> 屏幕像素
+    void FromScreen(Window* w, int sx, int sy, float* x, float* y); // 屏幕像素 -> 客户区 DIP
     bool CursorPos(Window* w, float* x, float* y); // 鼠标在客户区里的位置（DIP）；返回是否在客户区内
     void SetTimer(Window* w, int id, int ms);
     void KillTimer(Window* w, int id);
@@ -109,8 +128,8 @@ namespace Wnd
     WinHandler* Handler(Window* w);
 
     // ---- 弹出窗口：无边框、整窗透明（自己画全部像素）、不抢焦点、总在最前（菜单、悬停预览）----
-    Window* NewPopup(WinHandler* h, void* owner, int x, int y); // 建在屏幕 (x, y) 处（决定用哪块屏的缩放）；先不显示
-    void SetBounds(Window* w, int x, int y, int width, int height); // 屏幕像素
+    Window* NewPopup(WinHandler* h, void* owner, int x, int y, const Str& title); // 建在屏幕 (x, y) 处（决定用哪块屏的缩放）；先不显示
+    void SetBounds(Window* w, int x, int y, int width, int height); // 屏幕像素（弹出窗口会重新放到最前）
     void ShowNoActivate(Window* w);
     // 马上画：画布 pw × ph 物理像素，EndPaint 时贴到窗口上（窗口大小跟着变）；BeginPaint 失败返回空，EndPaint 照样要调
     Painter* BeginPaint(Window* w, int pw, int ph);
@@ -129,6 +148,38 @@ namespace Wnd
     };
     // 先把 owner 带到前台（菜单的命令要回到它身上），然后一直跑到 loop->done
     void RunPopupLoop(Window* root, void* owner, PopupLoop* loop);
+
+    // ---- 便签窗口：无边框、整窗透明（自己画全部像素，用 BeginPaint / EndPaint）；点了会激活，可以编辑 ----
+    enum { LevelDesktop, LevelNormal, LevelTopmost };
+    Window* NewNoteWindow(WinHandler* h, const Str& title, int x, int y); // 先不显示
+    void SetLevel(Window* w, int level, bool peeking); // 置底（挂到桌面，显示桌面时也在）/ 普通（进任务栏）/ 置顶；peeking：正临时提到最前
+    void PeekToTop(Window* w);                // 临时提到最前（置底的也摘下来）；结束时再调 SetLevel
+    void ToBottom(Window* w);                 // 压到所有窗口下面
+    void SetTitle(Window* w, const Str& title);
+    void Move(Window* w, int x, int y);       // 屏幕像素，大小不变
+    void Hide(Window* w);
+    void Activate(Window* w);                 // 带到前台并拿到键盘焦点
+    void DragMove(Window* w);                 // 交给系统拖着走，松开鼠标后才返回
+    void DragResize(Window* w, int edge);     // 交给系统拖边框：1 左 2 右 3 上 4 左上 5 右上 6 下 7 左下 8 右下
+
+    // ---- 屏幕 ----
+    bool OnScreen(int x, int y);              // 这一点在不在某块屏上
+    bool ScreenOf(RectI r, RectI* workArea);  // r 落在哪块屏上，给出它的工作区；不在任何屏上返回 false
+    RectI PrimaryWorkArea();
+    PointI CursorScreen();
+
+    // ---- 输入法和系统光标（系统光标不显示，只是让输入法、读屏知道光标在哪）----
+    void ImeAttach(Window* w, float caretH);  // 开始编辑
+    void ImeDetach(Window* w);                // 结束编辑
+    void ImeSetCaret(Window* w, RectF caret); // 客户区 DIP：组字窗口、候选框跟着它
+    void ImeFinish(Window* w, bool cancel);   // 结束正在组的字（上屏或取消）
+    int CaretBlinkMs();
+
+    // ---- 剪贴板、选颜色 ----
+    void ClipboardSet(const Str& text);
+    Str ClipboardText();                      // 去掉了换行、Tab 以外的控制字符
+    bool ClipboardHasText();
+    bool PickColor(Window* owner, u32* rgb);  // 0xRRGGBB；取消返回 false
 
     // ---- 原生输入框 ----
     enum { FieldCenter = 1, FieldPassword = 2, FieldNoIme = 4 };

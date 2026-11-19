@@ -1,10 +1,5 @@
 // 一张便签的窗口：绘制、布局、鼠标键盘、编辑、排序、撤销、胶囊、窗口模式、右键菜单
 #include "ui.h"
-#include <windowsx.h>
-#include <commctrl.h>
-#include <shellapi.h>
-#include <commdlg.h>
-#include <imm.h>
 
 // =====================================================================
 // 便签正文的排版（gfx.h 的 FontNote；固定行高时基线在 0.78 处）
@@ -101,9 +96,17 @@ static void DrawLayout(Painter* rt, float x, float y, TextLayout* l, u32 color, 
 // =====================================================================
 // 创建、销毁
 // =====================================================================
-static const wchar_t* NoteClass = L"DeskNoteNote";
-static const wchar_t* PreviewClass = L"DeskNotePreview";
-enum { TimerHide = 1, TimerSlide = 2, TimerProgman = 3, TimerCaret = 4, TimerFlash = 5 };
+enum { TimerHide = 1, TimerSlide = 2, TimerCaret = 4, TimerFlash = 5 };
+
+// 胶囊的悬停预览：单独一个弹出窗口
+struct NotePreview : WinHandler
+{
+    NoteWin* n;
+    explicit NotePreview(NoteWin* note) : n(note) {}
+    void Paint(Window*, Painter*, float, float) override {}
+    int CursorAt(Window*, float, float) override { return CursorHand; }
+    bool OnEvent(Window*, const Event& e) override { return n->OnPreviewEvent(e); }
+};
 
 bool NoteWin::debugNoFocus = false;
 NoteWin::NoteWin(NoteData* data) : d(data) {}
@@ -114,41 +117,21 @@ NoteWin::~NoteWin()
     for (int i = 0; i < undo.n; i++) delete undo[i];
     for (int i = 0; i < redo.n; i++) delete redo[i];
     delete pending;
+    delete previewHandler;
 }
 
-static void RegisterNoteClasses()
-{
-    static bool done;
-    if (done) return;
-    done = true;
-    WNDCLASSW wc = {};
-    wc.style = CS_DBLCLKS;
-    wc.lpfnWndProc = NoteWin::WndProc;
-    wc.hInstance = g_inst;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = g_app->icon;
-    wc.lpszClassName = NoteClass;
-    RegisterClassW(&wc);
-    wc.style = 0;
-    wc.lpfnWndProc = NoteWin::PreviewProc;
-    wc.hCursor = LoadCursorW(nullptr, IDC_HAND);
-    wc.lpszClassName = PreviewClass;
-    RegisterClassW(&wc);
-}
 
-float NoteWin::Scale() const { return hwnd ? GetDpiForWindow(hwnd) / 96.f : 1.f; }
+float NoteWin::Scale() const { return win ? Wnd::Scale(win) : 1.f; }
 
 void NoteWin::Create()
 {
-    RegisterNoteClasses();
-    hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, NoteClass, d->title.c(), WS_POPUP,
-                           80, 80, 10, 10, nullptr, nullptr, g_inst, this);
-    taskbarCreatedMsg = (int)RegisterWindowMessageW(L"TaskbarCreated");
+    win = Wnd::NewNoteWindow(this, d->title, 80, 80);
+    if (!win) return;
     RestorePosition();
     ApplyMode();
     if (d->collapsed) EnterCollapsed();
     else Render();
-    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    Wnd::ShowNoActivate(win);
     if (d->collapsed) { SnapCapsule(); ScheduleCapsuleHide(); }
 }
 
@@ -156,13 +139,12 @@ void NoteWin::Destroy()
 {
     CommitEdit(true);
     ClosePreview();
-    if (hwnd)
+    if (win)
     {
         SaveLayout();
-        HWND h = hwnd;
-        hwnd = nullptr;
-        SetWindowLongPtrW(h, GWLP_USERDATA, 0);
-        DestroyWindow(h);
+        Window* w = win;
+        win = nullptr;
+        Wnd::Destroy(w);
     }
 }
 
@@ -226,8 +208,8 @@ int NoteWin::HitToolbar(float xd, float yd) const
 
 void NoteWin::Render()
 {
-    if (!hwnd) return;
-    SetWindowTextW(hwnd, d->title.c());
+    if (!win) return;
+    Wnd::SetTitle(win, d->title);
     if (d->collapsed)
     {
         // ---- 胶囊：标题 + 未完成条数的小圆标 ----
@@ -245,42 +227,39 @@ void NoteWin::Render()
         float cf = R1(size * 0.8f);
         float badgeH = R0(cf * 1.55f), badgeW = Max(badgeH, R0(Ui::Measure(count, cf, 600) + 12));
         float H = R0(Max(th, badgeH) + 12), W = R0(14 + tw + 8 + badgeW + 8);
-        Canvas c;
-        if (c.Begin((int)(W * S + 0.99f), (int)(H * S + 0.99f), 96 * S))
+        int cpw = (int)(W * S + 0.99f), cph = (int)(H * S + 0.99f);
+        if (Painter* crt = Wnd::BeginPaint(win, cpw, cph))
         {
-            W = c.pw / S; H = c.ph / S;
+            W = cpw / S; H = cph / S;
             const float r = H / 2;
             bool docked = dockL || dockR || dockT || dockB;
-            Ui::FillCorners(c.rt, RectF(0, 0, W, H), dockL || dockT ? 0 : r, dockR || dockT ? 0 : r,
+            Ui::FillCorners(crt, RectF(0, 0, W, H), dockL || dockT ? 0 : r, dockR || dockT ? 0 : r,
                             dockR || dockB ? 0 : r, dockL || dockB ? 0 : r, Argb(d->bgColor, (float)Max(d->opacity, 0.8)));
-            if (!docked) Ui::Stroke(c.rt, RectF(0, 0, W, H), r, Argb(d->textColor, 0.14f), 1);
-            if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(c.rt, RectF(0, 0, W, H), r, Ui::T.accent, 3);
-            Gfx::GrayscaleText(c.rt);
-            Gfx::Draw(c.rt, lt, 14, (H - th) / 2, Argb(d->textColor, 1), true);
+            if (!docked) Ui::Stroke(crt, RectF(0, 0, W, H), r, Argb(d->textColor, 0.14f), 1);
+            if (flashUntil && (TickMs() / 200) % 2 == 0) Ui::Stroke(crt, RectF(0, 0, W, H), r, Ui::T.accent, 3);
+            Gfx::GrayscaleText(crt);
+            Gfx::Draw(crt, lt, 14, (H - th) / 2, Argb(d->textColor, 1), true);
             RectF br = RectF(W - 8 - badgeW, (H - badgeH) / 2, W - 8, (H + badgeH) / 2);
-            Ui::Fill(c.rt, br, badgeH / 2, Argb(d->textColor, 0.16f));
-            Ui::Text(c.rt, count, br, cf, 600, Argb(d->textColor, 0.9f), Ui::Center);
+            Ui::Fill(crt, br, badgeH / 2, Argb(d->textColor, 0.16f));
+            Ui::Text(crt, count, br, cf, 600, Argb(d->textColor, 0.9f), Ui::Center);
         }
-        c.End(hwnd);
+        Wnd::EndPaint(win);
         Gfx::Free(lt);
-        if (preview && IsWindowVisible(preview)) RenderPreview();
+        if (preview && Wnd::IsVisible(preview)) RenderPreview();
         return;
     }
     float S = Scale();
     int pw = (int)(d->width * S + 0.5), ph = (int)(d->height * S + 0.5);
-    Canvas c;
-    c.Begin(pw, ph, 96 * S);
-    if (c.rt)
+    if (Painter* rt = Wnd::BeginPaint(win, pw, ph))
     {
         float W = pw / S, H = ph / S;
-        Painter* rt = c.rt;
         Gfx::GrayscaleText(rt);
         const u32 fg = Argb(d->textColor, 1), dim = Argb(d->textColor, 0.55f);
         const float radius = 8;
         Ui::Fill(rt, RectF(0, 0, W, H), radius, Argb(d->bgColor, (float)Max(d->opacity, 1.0 / 255)));
         // 细描边：背景很透明时只在鼠标移上来时出现，平时只剩文字
         if (d->opacity >= 0.12 || hover) Ui::Stroke(rt, RectF(0, 0, W, H), radius, Argb(d->textColor, hover ? 0.18f : 0.1f), 1);
-        if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(rt, RectF(0, 0, W, H), radius, Ui::T.accent, 3);
+        if (flashUntil && (TickMs() / 200) % 2 == 0) Ui::Stroke(rt, RectF(0, 0, W, H), radius, Ui::T.accent, 3);
 
         bool showUi = hover && editIndex == NotEditing && dragIndex < 0 && !g_app->peeking;
         float left = PadX, right = W - PadX, top = PadTop, bottom = H - PadBottom;
@@ -389,10 +368,8 @@ void NoteWin::Render()
             Ui::Fill(rt, RectF(W - 5, ty, W - 2, ty + th), 1.5f, Argb(d->textColor, 0.35f));
         }
     }
-    c.End(hwnd);
+    Wnd::EndPaint(win);
 }
-
-void NoteWin::PaintTo(HDC, int, int) {}
 
 // =====================================================================
 // 命中测试
@@ -407,13 +384,13 @@ int NoteWin::HitRow(float yDip) const
 }
 
 // WMSZ_*: 1 左 2 右 3 上 4 左上 5 右上 6 下 7 左下 8 右下
-int NoteWin::HitEdge(int x, int y) const
+int NoteWin::HitEdge(float x, float y) const
 {
     if (d->collapsed) return 0;
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    int e = (int)(8 * Scale());
-    bool l = x < e, r = x > rc.right - e, t = y < e, b = y > rc.bottom - e;
+    float W, H;
+    Wnd::ClientSize(win, &W, &H);
+    const float e = 8;
+    bool l = x < e, r = x > W - e, t = y < e, b = y > H - e;
     if (t && l) return 4; if (t && r) return 5; if (b && l) return 7; if (b && r) return 8;
     if (l) return 1; if (r) return 2; if (t) return 3; if (b) return 6;
     return 0;
@@ -449,7 +426,7 @@ void NoteWin::ApplyExternal(NoteData* fresh)
     d->CopyContentFrom(*fresh);
     ClearUndo(); // 外部改过以后，旧的撤销记录对不上了
     if (fresh->hidden != d->hidden) SetHidden(fresh->hidden);
-    if (!hwnd) { d->mode = fresh->mode; d->collapsed = fresh->collapsed; } // 隐藏着：只记下来，显示时按它建窗口
+    if (!win) { d->mode = fresh->mode; d->collapsed = fresh->collapsed; } // 隐藏着：只记下来，显示时按它建窗口
     else
     {
         if (fresh->mode != d->mode) SetMode(fresh->mode);
@@ -587,7 +564,7 @@ void NoteWin::BeginReorder(int index)
     dragIndex = index;
     dragChanged = false;
     Render();
-    SetCapture(hwnd);
+    Wnd::Capture(win, true);
 }
 
 void NoteWin::OnReorderMove(float yDip)
@@ -611,9 +588,8 @@ void NoteWin::OnReorderMove(float yDip)
         }
     }
     // 拖到上下边缘时自动滚动
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    float H = rc.bottom / Scale();
+    float H;
+    Wnd::ClientSize(win, nullptr, &H);
     float maxScroll = Max(0.f, contentHeight - (H - PadTop - PadBottom));
     if (yDip < PadTop + 20 && scrollY > 0) { scrollY = Max(0.f, scrollY - LineH(d)); Render(); }
     else if (yDip > H - PadBottom - 20 && scrollY < maxScroll) { scrollY = Min(maxScroll, scrollY + LineH(d)); Render(); }
@@ -623,7 +599,7 @@ void NoteWin::EndReorder()
 {
     if (dragIndex < 0) return;
     dragIndex = -1;
-    if (GetCapture() == hwnd) ReleaseCapture();
+    Wnd::Capture(win, false);
     if (dragChanged) Save();
     EndChange();
     Render();
@@ -660,13 +636,9 @@ void NoteWin::BeginEdit(int index)
     editRedo.Clear();
     editLastKind = 0;
     editSelecting = false;
-    if (!debugNoFocus)
-    {
-        SetForegroundWindow(hwnd);
-        SetFocus(hwnd);
-    }
+    if (!debugNoFocus) Wnd::Activate(win);
     // 系统光标不显示，只是让输入法、读屏软件知道光标在哪
-    CreateCaret(hwnd, nullptr, 1, (int)(LineH(d) * Scale()));
+    Wnd::ImeAttach(win, LineH(d));
     EditUpdated();
 }
 
@@ -884,52 +856,19 @@ void NoteWin::EditUndoRedo(bool redoIt)
     EditUpdated();
 }
 
-static void ClipSet(HWND h, const Str& s)
-{
-    Str t = s.Replace(L"\n", L"\r\n");
-    if (!OpenClipboard(h)) return;
-    EmptyClipboard();
-    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (t.n + 1) * sizeof(wchar_t));
-    if (g)
-    {
-        wchar_t* p = (wchar_t*)GlobalLock(g);
-        for (int i = 0; i < t.n; i++) p[i] = t.p[i];
-        p[t.n] = 0;
-        GlobalUnlock(g);
-        if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
-    }
-    CloseClipboard();
-}
 
-static Str ClipGet(HWND h)
-{
-    Str s;
-    if (!OpenClipboard(h)) return s;
-    HANDLE g = GetClipboardData(CF_UNICODETEXT);
-    if (g)
-    {
-        const wchar_t* p = (const wchar_t*)GlobalLock(g);
-        if (p) s = p;
-        GlobalUnlock(g);
-    }
-    CloseClipboard();
-    // 去掉控制字符（换行、Tab 保留）
-    Str out;
-    for (int i = 0; i < s.n; i++) if (s.p[i] >= 32 || s.p[i] == L'\n' || s.p[i] == L'\r' || s.p[i] == L'\t') out.Ch(s.p[i]);
-    return out;
-}
 
 void NoteWin::EditCopy(bool cut)
 {
     int a = Min(caret, anchor), b = Max(caret, anchor);
     if (b <= a) return;
-    ClipSet(hwnd, editText.Sub(a, b - a));
+    Wnd::ClipboardSet(editText.Sub(a, b - a));
     if (cut) EditReplace(a, b, Str(), 0);
 }
 
 void NoteWin::EditPaste()
 {
-    Str s = ClipGet(hwnd);
+    Str s = Wnd::ClipboardText();
     if (s.n) EditInsert(s, 0);
 }
 
@@ -950,47 +889,47 @@ void NoteWin::EditSelectWord(int pos)
 }
 
 // 键盘：返回 true 表示已处理
-bool NoteWin::EditKey(WPARAM vk)
+bool NoteWin::EditKey(int vk, int mods)
 {
     if (compText.n) return false; // 输入法组字时按键归输入法
-    bool shift = GetKeyState(VK_SHIFT) < 0, ctrl = GetKeyState(VK_CONTROL) < 0;
+    bool shift = (mods & ModShift) != 0, ctrl = (mods & ModCtrl) != 0;
     int n = editText.n;
     bool hasSel = caret != anchor;
     switch (vk)
     {
-    case VK_LEFT: case VK_RIGHT:
+    case KeyLeft: case KeyRight:
     {
-        int dir = vk == VK_RIGHT ? 1 : -1;
+        int dir = vk == KeyRight ? 1 : -1;
         editGoalX = -1;
         if (hasSel && !shift && !ctrl) EditSetCaret(dir < 0 ? Min(caret, anchor) : Max(caret, anchor), false);
         else EditSetCaret(EditStep(caret, dir, ctrl), shift);
         return true;
     }
-    case VK_UP: case VK_DOWN:
+    case KeyUp: case KeyDown:
     {
         float keep = editGoalX;
-        int p = EditLineMove(caret, vk == VK_UP ? -1 : 1);
+        int p = EditLineMove(caret, vk == KeyUp ? -1 : 1);
         float goal = editGoalX;
         EditSetCaret(p, shift);
         editGoalX = keep >= 0 ? keep : goal;
         return true;
     }
-    case VK_HOME: editGoalX = -1; EditSetCaret(ctrl ? 0 : EditLineMove(caret, 0), shift); return true;
-    case VK_END: editGoalX = -1; EditSetCaret(ctrl ? n : EditLineMove(caret, 1), shift); return true;
-    case VK_BACK:
+    case KeyHome: editGoalX = -1; EditSetCaret(ctrl ? 0 : EditLineMove(caret, 0), shift); return true;
+    case KeyEnd: editGoalX = -1; EditSetCaret(ctrl ? n : EditLineMove(caret, 1), shift); return true;
+    case KeyBack:
         if (hasSel) EditInsert(Str(), 0);
         else if (caret > 0) EditReplace(EditStep(caret, -1, ctrl), caret, Str(), 2);
         return true;
-    case VK_DELETE:
+    case KeyDelete:
         if (shift && hasSel) { EditCopy(true); return true; }
         if (hasSel) EditInsert(Str(), 0);
         else if (caret < n) EditReplace(caret, EditStep(caret, 1, ctrl), Str(), 2);
         return true;
-    case VK_INSERT:
+    case KeyInsert:
         if (ctrl) EditCopy(false);
         else if (shift) EditPaste();
         return true;
-    case VK_RETURN:
+    case KeyEnter:
         if (shift)
         {
             if (editIndex != TitleIndex) EditInsert(Str(L"\n"), 0); // Shift+Enter：在这一条里换行
@@ -1003,8 +942,8 @@ bool NoteWin::EditKey(WPARAM vk)
             if (continueAdding) BeginEdit(d->items.n);
         }
         return true;
-    case VK_ESCAPE: CommitEdit(false); return true;
-    case VK_TAB: return true;
+    case KeyEscape: CommitEdit(false); return true;
+    case KeyTab: return true;
     }
     if (ctrl)
     {
@@ -1032,7 +971,7 @@ void NoteWin::EditUpdated()
 {
     if (!Editing()) return;
     caretOn = true;
-    SetTimer(hwnd, TimerCaret, GetCaretBlinkTime(), nullptr);
+    Wnd::SetTimer(win, TimerCaret, Wnd::CaretBlinkMs());
     Render();
     // 滚动到光标可见
     float H = (float)d->height;
@@ -1048,103 +987,17 @@ void NoteWin::EditUpdated()
 void NoteWin::UpdateImePos()
 {
     if (!Editing()) return;
-    float S = Scale();
-    POINT p = { (LONG)(caretBox.left * S), (LONG)((caretBox.top - scrollY) * S) };
-    LONG bottom = (LONG)((caretBox.bottom - scrollY) * S);
-    SetCaretPos(p.x, p.y);
-    HIMC imc = ImmGetContext(hwnd);
-    if (!imc) return;
-    COMPOSITIONFORM cf = {};
-    cf.dwStyle = CFS_POINT;
-    cf.ptCurrentPos = p;
-    ImmSetCompositionWindow(imc, &cf);
-    CANDIDATEFORM cand = {};
-    cand.dwIndex = 0;
-    cand.dwStyle = CFS_EXCLUDE;
-    cand.ptCurrentPos.x = p.x;
-    cand.ptCurrentPos.y = bottom;
-    cand.rcArea.left = p.x;
-    cand.rcArea.top = p.y;
-    cand.rcArea.right = p.x + 1;
-    cand.rcArea.bottom = bottom;
-    ImmSetCandidateWindow(imc, &cand);
-    ImmReleaseContext(hwnd, imc);
+    Wnd::ImeSetCaret(win, RectF(caretBox.left, caretBox.top - scrollY, caretBox.right, caretBox.bottom - scrollY));
 }
 
-static Str ImeString(HIMC imc, DWORD which)
-{
-    LONG bytes = ImmGetCompositionStringW(imc, which, nullptr, 0);
-    Str s;
-    if (bytes <= 0) return s;
-    s.Reserve(bytes / 2 + 1);
-    ImmGetCompositionStringW(imc, which, s.p, bytes);
-    s.n = bytes / 2;
-    s.p[s.n] = 0;
-    return s;
-}
 
 // 输入法消息：组字直接画在光标处，候选框跟着光标；返回 true 表示已处理
-bool NoteWin::EditIme(UINT m, WPARAM w, LPARAM l, LRESULT* r)
-{
-    if (!Editing()) return false;
-    switch (m)
-    {
-    case WM_IME_SETCONTEXT:
-        *r = DefWindowProcW(hwnd, m, w, l & ~ISC_SHOWUICOMPOSITIONWINDOW);
-        return true;
-    case WM_IME_STARTCOMPOSITION:
-        if (caret != anchor) EditInsert(Str(), 0);
-        UpdateImePos();
-        *r = 0;
-        return true;
-    case WM_IME_COMPOSITION:
-    {
-        HIMC imc = ImmGetContext(hwnd);
-        if (imc)
-        {
-            if (l & GCS_RESULTSTR)
-            {
-                Str res = ImeString(imc, GCS_RESULTSTR);
-                compText = Str();
-                compCursor = 0;
-                if (res.n) EditInsert(res, 1);
-            }
-            if (l & GCS_COMPSTR)
-            {
-                compText = ImeString(imc, GCS_COMPSTR);
-                LONG cur = (l & GCS_CURSORPOS) ? ImmGetCompositionStringW(imc, GCS_CURSORPOS, nullptr, 0) : compText.n;
-                compCursor = Clamp((int)LOWORD(cur), 0, compText.n);
-            }
-            else if (!(l & GCS_RESULTSTR)) compText = Str();
-            ImmReleaseContext(hwnd, imc);
-        }
-        EditUpdated();
-        *r = 0;
-        return true;
-    }
-    case WM_IME_ENDCOMPOSITION:
-        compText = Str();
-        compCursor = 0;
-        EditUpdated();
-        *r = 0;
-        return true;
-    case WM_IME_CHAR:
-        *r = 0; // 结果已经在 WM_IME_COMPOSITION 里插进去了
-        return true;
-    }
-    return false;
-}
 
 // 结束输入法正在进行的组字（点鼠标、提交时）
 void NoteWin::EditFinishIme(bool cancel)
 {
     if (!compText.n) return;
-    HIMC imc = ImmGetContext(hwnd);
-    if (imc)
-    {
-        ImmNotifyIME(imc, NI_COMPOSITIONSTR, cancel ? CPS_CANCEL : CPS_COMPLETE, 0);
-        ImmReleaseContext(hwnd, imc);
-    }
+    Wnd::ImeFinish(win, cancel);
     compText = Str();
 }
 
@@ -1155,10 +1008,10 @@ void NoteWin::EditContextMenu(int sx, int sy)
     Ui::Menu m;
     m.Item(CCut, L"剪切", 0xE8C6, L"Ctrl+X").disabled = !sel;
     m.Item(CCopy, L"复制", 0xE8C8, L"Ctrl+C").disabled = !sel;
-    m.Item(CPaste, L"粘贴", 0xE77F, L"Ctrl+V").disabled = !IsClipboardFormatAvailable(CF_UNICODETEXT);
+    m.Item(CPaste, L"粘贴", 0xE77F, L"Ctrl+V").disabled = !Wnd::ClipboardHasText();
     m.Sep();
     m.Item(CAll, L"全选", 0xE8B3, L"Ctrl+A");
-    int cmd = Ui::MenuRun(hwnd, &m, sx, sy, nullptr, nullptr);
+    int cmd = Ui::MenuRun(Wnd::Native(win), &m, sx, sy, nullptr, nullptr);
     if (!Editing()) return;
     switch (cmd)
     {
@@ -1194,8 +1047,8 @@ void NoteWin::CommitEdit(bool save)
     if (idx == TitleIndex) text = text.Replace(L"\n", L" ").Trim();
     editIndex = NotEditing;
     editSelecting = false;
-    KillTimer(hwnd, TimerCaret);
-    DestroyCaret();
+    Wnd::KillTimer(win, TimerCaret);
+    Wnd::ImeDetach(win);
     editUndo.Clear();
     editRedo.Clear();
     if (pendingReload && changeDepth == 0)
@@ -1237,19 +1090,17 @@ void NoteWin::CommitEdit(bool save)
 // =====================================================================
 // 链接
 // =====================================================================
-bool NoteWin::TryOpenLink(int x, int y)
+bool NoteWin::TryOpenLink(float xd, float yd)
 {
-    float S = Scale();
-    float xd = x / S, yd = y / S;
     int idx = HitRow(yd);
     if (idx < 0 || idx >= d->items.n) return false;
     const RowInfo* row = nullptr;
     for (int i = 0; i < rows.n; i++) if (rows[i].index == idx) row = &rows[i];
     if (!row) return false;
-    RECT rc;
-    GetClientRect(hwnd, &rc);
+    float cw;
+    Wnd::ClientSize(win, &cw, nullptr);
     NoteFont fb = MakeFormat((float)d->fontSize, d->fontWeight, true);
-    TextLayout* l = ItemLayout(d, d->items[idx], fb, ItemTextWidth(d, d->items[idx], rc.right / S - PadX - row->textLeft), false);
+    TextLayout* l = ItemLayout(d, d->items[idx], fb, ItemTextWidth(d, d->items[idx], cw - PadX - row->textLeft), false);
     bool inside = false;
     int at = 0;
     Gfx::HitPoint(l, xd - row->textLeft, yd + scrollY - row->top, &inside, &at);
@@ -1260,7 +1111,7 @@ bool NoteWin::TryOpenLink(int x, int y)
     for (int i = 0; i < links.n; i++)
         if (at >= links[i].start && at < links[i].start + links[i].len)
         {
-            ShellExecuteW(nullptr, L"open", links[i].url.c(), nullptr, nullptr, SW_SHOWNORMAL);
+            Wnd::OpenUrl(links[i].url);
             return true;
         }
     return false;
@@ -1269,38 +1120,32 @@ bool NoteWin::TryOpenLink(int x, int y)
 // =====================================================================
 // 鼠标
 // =====================================================================
-void NoteWin::OnLButtonDown(int x, int y, bool dbl)
+void NoteWin::OnLButtonDown(float xd, float yd, bool dbl, int mods)
 {
-    float S = Scale();
     if (d->collapsed)
     {
         // 胶囊：按住拖动；没拖动就是单击，展开
         ClosePreview();
-        KillTimer(hwnd, TimerSlide);
+        Wnd::KillTimer(win, TimerSlide);
         sliding = false;
-        if (capHidden) { SetWindowPos(hwnd, nullptr, dockedX, dockedY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); capHidden = false; }
-        RECT before;
-        GetWindowRect(hwnd, &before);
-        ReleaseCapture();
-        SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
-        RECT after;
-        GetWindowRect(hwnd, &after);
+        if (capHidden) { Wnd::Move(win, dockedX, dockedY); capHidden = false; }
+        RectI before = Wnd::ScreenBounds(win);
+        Wnd::DragMove(win);
+        RectI after = Wnd::ScreenBounds(win);
         if (Abs(after.left - before.left) < 3 && Abs(after.top - before.top) < 3) Expand();
         else { SnapCapsule(); SaveLayout(); ScheduleCapsuleHide(); }
         SendToBottom();
         return;
     }
-    int edge = HitEdge(x, y);
+    int edge = HitEdge(xd, yd);
     if (edge)
     {
-        ReleaseCapture();
-        SendMessageW(hwnd, WM_SYSCOMMAND, 0xF000 + edge, 0);
+        Wnd::DragResize(win, edge);
         return;
     }
     // 正在编辑：点在编辑区里是挪光标（Shift 扩选、双击选词），点到别处先保存这一条
     if (Editing())
     {
-        float xd = x / S, yd = y / S;
         if (InEditBox(xd, yd))
         {
             EditFinishIme(false);
@@ -1309,26 +1154,24 @@ void NoteWin::OnLButtonDown(int x, int y, bool dbl)
             else
             {
                 editGoalX = -1;
-                EditSetCaret(p, GetKeyState(VK_SHIFT) < 0);
+                EditSetCaret(p, (mods & ModShift) != 0);
                 editSelecting = true;
-                SetCapture(hwnd);
+                Wnd::Capture(win, true);
             }
             return;
         }
         CommitEdit(true);
         return;
     }
-    SetFocus(hwnd);
-    if (GetKeyState(VK_CONTROL) < 0 && TryOpenLink(x, y)) return;
-    float xd = x / S, yd = y / S;
+    Wnd::Focus(win);
+    if ((mods & ModCtrl) && TryOpenLink(xd, yd)) return;
     // 标题栏按钮：新增、菜单、折叠
     switch (HitToolbar(xd, yd))
     {
     case 1: BeginEdit(d->items.n); return;
     case 2:
     {
-        POINT p = { (int)(toolBtn[1].left * S), (int)((toolBtn[1].bottom - scrollY + 4) * S) };
-        ClientToScreen(hwnd, &p);
+        PointI p = Wnd::ToScreen(win, toolBtn[1].left, toolBtn[1].bottom - scrollY + 4);
         OnContextMenu(p.x, p.y);
         return;
     }
@@ -1365,8 +1208,7 @@ void NoteWin::OnLButtonDown(int x, int y, bool dbl)
         BeginEdit(idx == NotEditing ? d->items.n : idx); // 双击空白处 = 新增一条
         return;
     }
-    ReleaseCapture();
-    SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    Wnd::DragMove(win);
     SaveLayout();
     SendToBottom();
 }
@@ -1376,33 +1218,19 @@ void NoteWin::OnLButtonDown(int x, int y, bool dbl)
 // =====================================================================
 void NoteWin::ApplyMode()
 {
-    if (!hwnd) return;
-    LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    if (d->mode == ModeNormal) ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW; // 进任务栏和 Alt+Tab
-    else ex = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
-    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
-    if (d->mode == ModeDesktop)
-    {
-        SetWindowPos(hwnd, peeking ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        if (!peeking) AttachToDesktop();
-    }
-    else
-    {
-        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
-        SetWindowPos(hwnd, d->mode == ModeTopmost || peeking ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (!win) return;
+    Wnd::SetLevel(win, d->mode == ModeDesktop ? Wnd::LevelDesktop : d->mode == ModeNormal ? Wnd::LevelNormal : Wnd::LevelTopmost, peeking);
 }
 
 void NoteWin::SetMode(WinMode m)
 {
     if (m == d->mode) return;
     d->mode = m;
-    if (!hwnd) return; // 隐藏着：显示时按它建窗口
+    if (!win) return; // 隐藏着：显示时按它建窗口
     // 任务栏按钮要在窗口重新显示时才会增减
-    ShowWindow(hwnd, SW_HIDE);
+    Wnd::Hide(win);
     ApplyMode();
-    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    Wnd::ShowNoActivate(win);
 }
 
 // 隐藏：销毁窗口（绘图资源一起释放，不占内存），便签对象和数据都留着，提醒、同步照常
@@ -1410,58 +1238,45 @@ void NoteWin::SetHidden(bool hide)
 {
     tempShown = false;
     d->hidden = hide;
-    if (hide) { if (hwnd) { peeking = false; Destroy(); } }
-    else if (!hwnd) Create();
+    if (hide) { if (win) { peeking = false; Destroy(); } }
+    else if (!win) Create();
     Save();
 }
 
 // 隐藏的便签到了提醒：临时建出窗口，结束「提到最前」时收回去（不改隐藏状态）
 void NoteWin::ShowTemporarily()
 {
-    if (hwnd) return;
+    if (win) return;
     tempShown = true;
     Create();
 }
 
 void NoteWin::Locate()
 {
-    if (!hwnd) return;
+    if (!win) return;
     Ui::LoadTheme();
     BringOnScreen();
     BeginPeek(); // 置顶，闪完放回去
-    flashUntil = GetTickCount() + 1600;
-    SetTimer(hwnd, TimerFlash, 200, nullptr);
+    flashUntil = TickMs() + 1600;
+    Wnd::SetTimer(win, TimerFlash, 200);
     Render();
 }
 
-// 置底模式：让桌面(Progman)成为所有者，Win+D 显示桌面时不会被藏起来；开机时桌面可能还没建好，就每 2 秒重试
-void NoteWin::AttachToDesktop()
-{
-    HWND progman = FindWindowW(L"Progman", nullptr);
-    if (progman)
-    {
-        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)progman);
-        SendToBottom();
-        KillTimer(hwnd, TimerProgman);
-        return;
-    }
-    SetTimer(hwnd, TimerProgman, 2000, nullptr);
-}
 
 void NoteWin::SendToBottom()
 {
-    if (hwnd && d->mode == ModeDesktop && !Editing() && !peeking)
-        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (win && KeepAtBottom(win)) Wnd::ToBottom(win);
 }
+
+// 置底模式下（非编辑时）始终压在其他窗口下面
+bool NoteWin::KeepAtBottom(Window*) { return d->mode == ModeDesktop && !Editing() && !peeking; }
 
 void NoteWin::BeginPeek()
 {
     peeking = true;
-    KillTimer(hwnd, TimerHide);
-    if (capHidden) { KillTimer(hwnd, TimerSlide); sliding = false; SetWindowPos(hwnd, nullptr, dockedX, dockedY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); capHidden = false; }
-    // 挂在桌面窗口下的便签设不了置顶，先摘下来，结束时再挂回去
-    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    Wnd::KillTimer(win, TimerHide);
+    if (capHidden) { Wnd::KillTimer(win, TimerSlide); sliding = false; Wnd::Move(win, dockedX, dockedY); capHidden = false; }
+    Wnd::PeekToTop(win);
 }
 
 void NoteWin::EndPeek()
@@ -1480,10 +1295,10 @@ void NoteWin::RestorePosition()
 {
     if (d->hasPos)
     {
-        RECT probe = { (int)d->x, (int)d->y, (int)d->x + 40, (int)d->y + 20 };
-        if (MonitorFromRect(&probe, MONITOR_DEFAULTTONULL))
+        RectI probe = { (int)d->x, (int)d->y, (int)d->x + 40, (int)d->y + 20 };
+        if (Wnd::ScreenOf(probe, nullptr))
         {
-            SetWindowPos(hwnd, nullptr, (int)d->x, (int)d->y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            Wnd::Move(win, (int)d->x, (int)d->y);
             return;
         }
     }
@@ -1492,29 +1307,22 @@ void NoteWin::RestorePosition()
 
 void NoteWin::PlaceDefault()
 {
-    POINT p0 = { 0, 0 };
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(MonitorFromPoint(p0, MONITOR_DEFAULTTOPRIMARY), &mi);
+    RectI wa = Wnd::PrimaryWorkArea();
     float S = Scale();
     int off = (int)(Max(0, g_app->IndexOf(this)) * 30 * S);
-    SetWindowPos(hwnd, nullptr, mi.rcWork.left + (int)(80 * S) + off, mi.rcWork.top + (int)(80 * S) + off, 0, 0,
-                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Wnd::Move(win, wa.left + (int)(80 * S) + off, wa.top + (int)(80 * S) + off);
 }
 
 void NoteWin::BringOnScreen()
 {
-    if (!hwnd) return;
-    if (capHidden) { SetWindowPos(hwnd, nullptr, dockedX, dockedY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); capHidden = false; }
-    RECT r;
-    GetWindowRect(hwnd, &r);
-    MONITORINFO mi = { sizeof(mi) };
-    HMONITOR mon = MonitorFromRect(&r, MONITOR_DEFAULTTONULL);
+    if (!win) return;
+    if (capHidden) { Wnd::Move(win, dockedX, dockedY); capHidden = false; }
+    RectI r = Wnd::ScreenBounds(win), wa;
     bool visible = false;
-    if (mon && GetMonitorInfoW(mon, &mi))
+    if (Wnd::ScreenOf(r, &wa))
     {
-        RECT in;
-        IntersectRect(&in, &mi.rcWork, &r);
-        visible = in.right - in.left >= Min((int)(r.right - r.left), 60) && in.bottom - in.top >= Min((int)(r.bottom - r.top), 20);
+        int iw = Min(wa.right, r.right) - Max(wa.left, r.left), ih = Min(wa.bottom, r.bottom) - Max(wa.top, r.top);
+        visible = iw >= Min(r.right - r.left, 60) && ih >= Min(r.bottom - r.top, 20);
     }
     if (!visible) { PlaceDefault(); if (d->collapsed) SnapCapsule(); }
     SaveLayout();
@@ -1522,25 +1330,20 @@ void NoteWin::BringOnScreen()
 
 void NoteWin::SaveLayout()
 {
-    if (!hwnd) return;
+    if (!win) return;
     // 只存位置。宽高只在用户拖边框缩放时改（WM_SIZE），不从窗口像素反推：
     // 跨缩放不同的屏拖动时，窗口像素可能还是旧屏的，反推出来会越拖越大
-    RECT r;
-    GetWindowRect(hwnd, &r);
+    RectI r = Wnd::ScreenBounds(win);
     d->hasPos = true;
     if (capHidden) { d->x = dockedX; d->y = dockedY; }
     else { d->x = r.left; d->y = r.top; }
     Save();
 }
 
-RECT NoteWin::WorkAreaPx() const
+RectI NoteWin::WorkAreaPx() const
 {
-    RECT r;
-    GetWindowRect(hwnd, &r);
-    POINT c = { (r.left + r.right) / 2, (r.top + r.bottom) / 2 };
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(MonitorFromPoint(c, MONITOR_DEFAULTTONEAREST), &mi);
-    return mi.rcWork;
+    RectI r = Wnd::ScreenBounds(win);
+    return Wnd::WorkAreaAt((r.left + r.right) / 2, (r.top + r.bottom) / 2);
 }
 
 // =====================================================================
@@ -1549,20 +1352,18 @@ RECT NoteWin::WorkAreaPx() const
 void NoteWin::Collapse()
 {
     if (d->collapsed) return;
-    if (!hwnd) { d->collapsed = true; Save(); return; }
+    if (!win) { d->collapsed = true; Save(); return; }
     CommitEdit(true);
     SaveLayout();
-    RECT wa = WorkAreaPx(), r;
-    GetWindowRect(hwnd, &r);
+    RectI wa = WorkAreaPx(), r = Wnd::ScreenBounds(win);
     int snap = (int)(24 * Scale());
     bool keepRight = Abs(wa.right - r.right) < snap, keepBottom = Abs(wa.bottom - r.bottom) < snap;
     EnterCollapsed();
-    RECT c;
-    GetWindowRect(hwnd, &c);
+    RectI c = Wnd::ScreenBounds(win);
     int x = c.left, y = c.top;
     if (keepRight) x = wa.right - (c.right - c.left);
     if (keepBottom) y = wa.bottom - (c.bottom - c.top);
-    SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Wnd::Move(win, x, y);
     SnapCapsule();
     SaveLayout();
     ScheduleCapsuleHide();
@@ -1578,15 +1379,14 @@ void NoteWin::EnterCollapsed()
 void NoteWin::Expand()
 {
     if (!d->collapsed) return;
-    if (!hwnd) { d->collapsed = false; Save(); return; }
-    KillTimer(hwnd, TimerHide);
-    KillTimer(hwnd, TimerSlide);
+    if (!win) { d->collapsed = false; Save(); return; }
+    Wnd::KillTimer(win, TimerHide);
+    Wnd::KillTimer(win, TimerSlide);
     sliding = false;
     ClosePreview();
-    if (capHidden) { SetWindowPos(hwnd, nullptr, dockedX, dockedY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); capHidden = false; }
+    if (capHidden) { Wnd::Move(win, dockedX, dockedY); capHidden = false; }
     // 贴在右/下边的胶囊，展开时朝屏幕里面展开
-    RECT wa = WorkAreaPx(), c;
-    GetWindowRect(hwnd, &c);
+    RectI wa = WorkAreaPx(), c = Wnd::ScreenBounds(win);
     bool wasR = dockR, wasB = dockB;
     dockL = dockR = dockT = dockB = false;
     d->collapsed = false;
@@ -1598,7 +1398,7 @@ void NoteWin::Expand()
     if (y + h > wa.bottom) y = wa.bottom - h;
     if (x < wa.left) x = wa.left;
     if (y < wa.top) y = wa.top;
-    SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Wnd::Move(win, x, y);
     Render();
     SaveLayout();
 }
@@ -1607,8 +1407,7 @@ void NoteWin::Expand()
 void NoteWin::SnapCapsule()
 {
     if (!d->collapsed || capHidden) return;
-    RECT wa = WorkAreaPx(), r;
-    GetWindowRect(hwnd, &r);
+    RectI wa = WorkAreaPx(), r = Wnd::ScreenBounds(win);
     int w = r.right - r.left, h = r.bottom - r.top, x = r.left, y = r.top;
     int snap = (int)(24 * Scale());
     if (x - wa.left < snap) x = wa.left;
@@ -1618,36 +1417,31 @@ void NoteWin::SnapCapsule()
     bool l = x == wa.left, rr = x + w == wa.right, t = y == wa.top, b = y + h == wa.bottom;
     bool changed = l != dockL || rr != dockR || t != dockT || b != dockB;
     dockL = l; dockR = rr; dockT = t; dockB = b;
-    if (x != r.left || y != r.top) SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (x != r.left || y != r.top) Wnd::Move(win, x, y);
     if (changed) Render();
 }
 
 void NoteWin::ScheduleCapsuleHide()
 {
     if (!d->collapsed) return;
-    SetTimer(hwnd, TimerHide, 700, nullptr);
+    Wnd::SetTimer(win, TimerHide, 700);
 }
 
-bool NoteWin::OtherScreenAt(int x, int y) const
-{
-    POINT p = { x, y };
-    return MonitorFromPoint(p, MONITOR_DEFAULTTONULL) != nullptr;
-}
+bool NoteWin::OtherScreenAt(int x, int y) const { return Wnd::OnScreen(x, y); }
 
 void NoteWin::OnHideTimer()
 {
-    KillTimer(hwnd, TimerHide);
-    POINT pt;
-    GetCursorPos(&pt);
-    RECT r;
-    GetWindowRect(hwnd, &r);
-    bool overMe = PtInRect(&r, pt) != FALSE;
+    Wnd::KillTimer(win, TimerHide);
+    PointI pt = Wnd::CursorScreen();
+    RectI r = Wnd::ScreenBounds(win);
+    auto in = [](const RectI& a, PointI p) { return p.x >= a.left && p.x < a.right && p.y >= a.top && p.y < a.bottom; };
+    bool overMe = in(r, pt);
     bool overPreview = false;
-    if (preview && IsWindowVisible(preview)) { RECT pr; GetWindowRect(preview, &pr); overPreview = PtInRect(&pr, pt) != FALSE; }
+    if (preview && Wnd::IsVisible(preview)) overPreview = in(Wnd::ScreenBounds(preview), pt);
     if (!d->collapsed || overMe || overPreview || peeking) { if (d->collapsed && (overMe || overPreview)) ScheduleCapsuleHide(); return; }
     ClosePreview();
     if (capHidden || !(dockL || dockR || dockT || dockB)) return;
-    RECT wa = WorkAreaPx();
+    RectI wa = WorkAreaPx();
     int w = r.right - r.left, h = r.bottom - r.top, x = r.left, y = r.top;
     int strip = (int)(5 * Scale());
     // 优先左右缩进；缩进方向那边要是挨着另一块屏幕就不缩，免得跑到那块屏上
@@ -1665,12 +1459,11 @@ void NoteWin::OnHideTimer()
 // 缓动移动窗口（约 150ms）
 void NoteWin::SlideTo(int x, int y)
 {
-    RECT r;
-    GetWindowRect(hwnd, &r);
+    RectI r = Wnd::ScreenBounds(win);
     slideFromX = r.left; slideFromY = r.top; slideToX = x; slideToY = y;
-    slideStart = GetTickCount();
+    slideStart = TickMs();
     sliding = true;
-    SetTimer(hwnd, TimerSlide, 8, nullptr);
+    Wnd::SetTimer(win, TimerSlide, 8);
 }
 
 // ---- 悬停预览卡片：单独一个分层窗口，画出所有条目 ----
@@ -1678,15 +1471,19 @@ void NoteWin::ShowPreview()
 {
     if (!d->collapsed || dragIndex >= 0) return;
     if (!preview)
-        preview = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, PreviewClass, L"DeskNote 预览", WS_POPUP,
-                                  0, 0, 10, 10, hwnd, nullptr, g_inst, this);
+    {
+        if (!previewHandler) previewHandler = new NotePreview(this);
+        RectI r = Wnd::ScreenBounds(win);
+        preview = Wnd::NewPopup(previewHandler, Wnd::Native(win), r.left, r.top, Str(L"DeskNote 预览"));
+    }
+    if (!preview) return;
     RenderPreview();
-    ShowWindow(preview, SW_SHOWNOACTIVATE);
+    Wnd::ShowNoActivate(preview);
 }
 
 void NoteWin::ClosePreview()
 {
-    if (preview) { DestroyWindow(preview); preview = nullptr; }
+    if (preview) { Window* p = preview; preview = nullptr; Wnd::Destroy(p); }
     previewHover = false;
 }
 
@@ -1722,10 +1519,9 @@ void NoteWin::RenderPreview()
         h += Max(lineH, LayoutHeight(l)) + gap;
     }
     float W = R0(contentW + 2 * padX), H = R0(Min(h - gap + padB, maxH));
-    Canvas c;
-    if (c.Begin((int)(W * S + 0.99f), (int)(H * S + 0.99f), 96 * S))
+    int pw = (int)(W * S + 0.99f), ph = (int)(H * S + 0.99f);
+    if (Painter* rt = Wnd::BeginPaint(preview, pw, ph))
     {
-        Painter* rt = c.rt;
         Gfx::GrayscaleText(rt);
         Ui::Fill(rt, RectF(0, 0, W, H), 8, Argb(d->bgColor, (float)Max(d->opacity, 0.94)));
         Ui::Stroke(rt, RectF(0, 0, W, H), 8, Argb(d->textColor, 0.16f), 1);
@@ -1751,52 +1547,41 @@ void NoteWin::RenderPreview()
         Gfx::PopClip(rt);
     }
     // 往屏幕里面的方向弹出
-    RECT r;
-    GetWindowRect(hwnd, &r);
-    int pw = c.pw, ph = c.ph, off = (int)(6 * S), x, y;
+    RectI r = Wnd::ScreenBounds(win);
+    int off = (int)(6 * S), x, y;
     if (dockR) { x = (capHidden ? dockedX : r.left) - pw - off; y = r.top; }
     else if (dockL) { x = (capHidden ? dockedX + (r.right - r.left) : r.right) + off; y = r.top; }
     else if (dockB) { x = r.left; y = r.top - ph - off; }
     else { x = r.left; y = r.bottom + off; }
-    RECT wa = WorkAreaPx();
+    RectI wa = WorkAreaPx();
     if (y + ph > wa.bottom) y = wa.bottom - ph;
     if (y < wa.top) y = wa.top;
     if (x + pw > wa.right) x = wa.right - pw;
     if (x < wa.left) x = wa.left;
-    SetWindowPos(preview, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-    c.End(preview);
+    Wnd::Move(preview, x, y);
+    Wnd::EndPaint(preview);
     for (int i = 0; i < ls.n; i++) Gfx::Free(ls[i]);
     Gfx::Free(lt);
 }
 
-LRESULT CALLBACK NoteWin::PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l)
+bool NoteWin::OnPreviewEvent(const Event& e)
 {
-    NoteWin* self = (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (m == WM_NCCREATE)
+    switch (e.type)
     {
-        self = (NoteWin*)((CREATESTRUCTW*)l)->lpCreateParams;
-        SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
-    }
-    if (!self) return DefWindowProcW(h, m, w, l);
-    switch (m)
-    {
-    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-    case WM_LBUTTONDOWN: self->Expand(); return 0;
-    case WM_MOUSEMOVE:
-        if (!self->previewHover)
+    case EvMouseDown: if (e.button == MouseLeft) Expand(); return true;
+    case EvMouseMove:
+        if (!previewHover)
         {
-            self->previewHover = true;
-            KillTimer(self->hwnd, TimerHide);
-            TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
-            TrackMouseEvent(&t);
+            previewHover = true;
+            Wnd::KillTimer(win, TimerHide);
         }
-        return 0;
-    case WM_MOUSELEAVE:
-        self->previewHover = false;
-        self->ScheduleCapsuleHide();
-        return 0;
+        return true;
+    case EvMouseLeave:
+        previewHover = false;
+        ScheduleCapsuleHide();
+        return true;
     }
-    return DefWindowProcW(h, m, w, l);
+    return false;
 }
 
 // =====================================================================
@@ -1861,13 +1646,13 @@ void NoteWin::AddStyleItems(Ui::Menu& m)
 }
 
 // 便签管理里一张便签的「设置」：和右键菜单同一套，隐藏着的便签也能改（显示时按新设置）
-void NoteWin::ShowSettingsMenu(int sx, int sy, HWND owner)
+void NoteWin::ShowSettingsMenu(int sx, int sy, void* owner)
 {
     CommitEdit(true);
     ClosePreview();
     Ui::Menu m;
     m.Header(d->title);
-    if (hwnd) m.Item(CmdRename, L"改标题", 0xE70F);
+    if (win) m.Item(CmdRename, L"改标题", 0xE70F);
     AddStyleItems(m);
     m.Sep();
     if (d->hidden) m.Item(CmdShow, L"显示这张便签", 0xE890);
@@ -1889,18 +1674,18 @@ void NoteWin::OnContextMenu(int sx, int sy)
 {
     if (Editing())
     {
-        POINT ep = { sx, sy };
-        ScreenToClient(hwnd, &ep);
-        if (InEditBox(ep.x / Scale(), ep.y / Scale())) { EditContextMenu(sx, sy); return; }
+        float ex, ey;
+        Wnd::FromScreen(win, sx, sy, &ex, &ey);
+        if (InEditBox(ex, ey)) { EditContextMenu(sx, sy); return; }
     }
     CommitEdit(true);
     ClosePreview();
     int target = NotEditing;
     if (!d->collapsed)
     {
-        POINT p = { sx, sy };
-        ScreenToClient(hwnd, &p);
-        target = HitRow(p.y / Scale());
+        float px, py;
+        Wnd::FromScreen(win, sx, sy, &px, &py);
+        target = HitRow(py);
     }
     bool onItem = !d->collapsed && target >= 0 && target < d->items.n;
     Ui::Menu m;
@@ -1941,19 +1726,17 @@ void NoteWin::OnContextMenu(int sx, int sy)
     // 菜单里实时调的外观算一步撤销
     BeginChange();
     menuChanged = false;
-    int cmd = Ui::MenuRun(hwnd, &m, sx, sy, NoteMenuLive, this);
+    int cmd = Ui::MenuRun(Wnd::Native(win), &m, sx, sy, NoteMenuLive, this);
     if (menuChanged) Save();
     EndChange();
     if (menuChanged) SendToBottom();
-    if (hwnd) PostMessageW(hwnd, WM_NULL, 0, 0);
     if (cmd) RunCommand(cmd, target);
-    if (hwnd && d->collapsed) ScheduleCapsuleHide();
+    if (win && d->collapsed) ScheduleCapsuleHide();
 }
 
 void NoteWin::DebugMenu(int sub)
 {
-    RECT r;
-    GetWindowRect(hwnd, &r);
+    RectI r = Wnd::ScreenBounds(win);
     float S = Scale();
     int y = r.top + (int)((rows.n ? rows[0].top - scrollY + 6 : 40) * S);
     Ui::MenuDebugOpenSub = sub;
@@ -2012,17 +1795,10 @@ void NoteWin::RunCommand(int cmd, int target)
 
 void NoteWin::PickColor(bool background)
 {
-    static COLORREF custom[16];
-    u32 cur = background ? d->bgColor : d->textColor;
-    CHOOSECOLORW cc = { sizeof(cc) };
-    cc.hwndOwner = hwnd;
-    cc.rgbResult = RGB((cur >> 16) & 255, (cur >> 8) & 255, cur & 255);
-    cc.lpCustColors = custom;
-    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
-    if (ChooseColorW(&cc))
+    u32 v = background ? d->bgColor : d->textColor;
+    if (Wnd::PickColor(win, &v))
     {
         BeginChange();
-        u32 v = (GetRValue(cc.rgbResult) << 16) | (GetGValue(cc.rgbResult) << 8) | GetBValue(cc.rgbResult);
         if (background) d->bgColor = v; else d->textColor = v;
         Save();
         EndChange();
@@ -2036,7 +1812,7 @@ void NoteWin::EditReminder(int index)
     if (index < 0 || index >= d->items.n) return;
     NoteItem cur = d->items[index];
     Time t;
-    int r = ReminderDialog(hwnd, cur.text, cur.hasRemind, cur.remind, &t);
+    int r = ReminderDialog(Wnd::Native(win), cur.text, cur.hasRemind, cur.remind, &t);
     if (!r) { SendToBottom(); return; }
     if (index >= d->items.n || d->items[index].text != cur.text) return; // 对话框开着时条目被别处改了
     BeginChange();
@@ -2058,256 +1834,216 @@ void NoteWin::OnRemindersFired()
 // =====================================================================
 // 窗口消息
 // =====================================================================
-LRESULT CALLBACK NoteWin::WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+
+int NoteWin::CursorAt(Window*, float xd, float yd)
 {
-    NoteWin* self = (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (m == WM_NCCREATE)
+    int cur = CursorArrow;
+    if (Editing() && InEditBox(xd, yd) && !HitEdge(xd, yd)) cur = CursorIBeam;
+    else if (!d->collapsed && dragIndex < 0)
     {
-        self = (NoteWin*)((CREATESTRUCTW*)l)->lpCreateParams;
-        self->hwnd = h;
-        SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
+        switch (HitEdge(xd, yd))
+        {
+        case 1: case 2: cur = CursorSizeWE; break;
+        case 3: case 6: cur = CursorSizeNS; break;
+        case 4: case 8: cur = CursorSizeNWSE; break;
+        case 5: case 7: cur = CursorSizeNESW; break;
+        default:
+        {
+            int idx = HitRow(yd);
+            bool row = idx >= 0 && idx < d->items.n;
+            const RowInfo* ri = nullptr;
+            for (int i = 0; row && i < rows.n; i++) if (rows[i].index == idx) ri = &rows[i];
+            if (row && xd < PadX) cur = CursorMove;
+            else if (row && d->checkboxes && xd >= PadX && xd < PadX + CheckColW(d)) cur = CursorHand;
+            else if (ri && ri->chipLeft > 0 && xd >= ri->chipLeft && yd + scrollY < ri->top + LineH(d)) cur = CursorHand;
+        }
+        }
     }
-    if (!self || !self->hwnd) return DefWindowProcW(h, m, w, l);
-    return self->Handle(m, w, l);
+    else if (dragIndex >= 0) cur = CursorSizeNS;
+    return cur;
 }
 
-LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
+// 只是拖着挪位置时（跨屏时系统会按旧屏的像素摆窗口），保持便签自己的大小
+bool NoteWin::KeepSizeOnMove(Window*, float* width, float* height)
 {
-    if (taskbarCreatedMsg && m == (UINT)taskbarCreatedMsg)
+    if (d->collapsed) return false;
+    *width = (float)d->width;
+    *height = (float)d->height;
+    return true;
+}
+
+bool NoteWin::MinSize(Window*, float* width, float* height)
+{
+    if (d->collapsed) return false;
+    *width = 160;
+    *height = 120;
+    return true;
+}
+
+bool NoteWin::OnEvent(Window* w, const Event& e)
+{
+    if (!win || w != win) return false;
+    switch (e.type)
     {
-        // 资源管理器重启：重新挂到新的桌面窗口上
-        if (d->mode == ModeDesktop && !peeking) AttachToDesktop();
-        return 0;
-    }
-    switch (m)
-    {
-    case WM_NCHITTEST: return HTCLIENT;
-    case WM_MOUSEACTIVATE: return MA_ACTIVATE;
-    case WM_SETCURSOR:
-    {
-        POINT p;
-        GetCursorPos(&p);
-        ScreenToClient(hwnd, &p);
-        LPCWSTR cur = IDC_ARROW;
-        if (Editing() && InEditBox(p.x / Scale(), p.y / Scale()) && !HitEdge(p.x, p.y)) cur = IDC_IBEAM;
-        else if (!d->collapsed && dragIndex < 0)
+    case EvMouseDown:
+        if (e.button == MouseLeft) OnLButtonDown(e.x, e.y, e.clicks == 2, e.mods);
+        return true;
+    case EvMouseUp:
+        if (e.button == MouseRight)
         {
-            switch (HitEdge(p.x, p.y))
-            {
-            case 1: case 2: cur = IDC_SIZEWE; break;
-            case 3: case 6: cur = IDC_SIZENS; break;
-            case 4: case 8: cur = IDC_SIZENWSE; break;
-            case 5: case 7: cur = IDC_SIZENESW; break;
-            default:
-            {
-                float xd = p.x / Scale(), yd = p.y / Scale();
-                int idx = HitRow(yd);
-                bool row = idx >= 0 && idx < d->items.n;
-                const RowInfo* ri = nullptr;
-                for (int i = 0; row && i < rows.n; i++) if (rows[i].index == idx) ri = &rows[i];
-                if (row && xd < PadX) cur = IDC_SIZEALL;
-                else if (row && d->checkboxes && xd >= PadX && xd < PadX + CheckColW(d)) cur = IDC_HAND;
-                else if (ri && ri->chipLeft > 0 && xd >= ri->chipLeft && yd + scrollY < ri->top + LineH(d)) cur = IDC_HAND;
-            }
-            }
+            PointI p = Wnd::ToScreen(win, e.x, e.y);
+            OnContextMenu(p.x, p.y);
+            return true;
         }
-        else if (dragIndex >= 0) cur = IDC_SIZENS;
-        SetCursor(LoadCursorW(nullptr, cur));
-        return TRUE;
-    }
-    case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l), false); return 0;
-    case WM_LBUTTONDBLCLK: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l), true); return 0;
-    case WM_LBUTTONUP:
-        if (editSelecting) { editSelecting = false; if (GetCapture() == hwnd) ReleaseCapture(); }
+        if (editSelecting) { editSelecting = false; Wnd::Capture(win, false); }
         if (dragIndex >= 0) EndReorder();
-        return 0;
-    case WM_CAPTURECHANGED:
-        if ((HWND)l != hwnd) editSelecting = false;
-        if (dragIndex >= 0 && (HWND)l != hwnd) EndReorder();
-        return 0;
-    case WM_MOUSEMOVE:
+        return true;
+    case EvCaptureLost:
+        editSelecting = false;
+        if (dragIndex >= 0) EndReorder();
+        return true;
+    case EvMouseMove:
     {
-        if (dragIndex >= 0) { OnReorderMove(GET_Y_LPARAM(l) / Scale()); return 0; }
+        if (dragIndex >= 0) { OnReorderMove(e.y); return true; }
         if (editSelecting && Editing())
         {
-            int pos = EditHit(GET_X_LPARAM(l) / Scale(), GET_Y_LPARAM(l) / Scale());
+            int pos = EditHit(e.x, e.y);
             if (pos != caret) EditSetCaret(pos, true);
-            return 0;
+            return true;
         }
         bool entered = false;
         if (!hover)
         {
             hover = true;
             entered = true;
-            TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, hwnd, 0 };
-            TrackMouseEvent(&t);
             if (d->collapsed)
             {
-                KillTimer(hwnd, TimerHide);
+                Wnd::KillTimer(win, TimerHide);
                 if (capHidden) { capHidden = false; SlideTo(dockedX, dockedY); }
                 ShowPreview();
-                return 0;
+                return true;
             }
         }
         if (!d->collapsed)
         {
             // 鼠标所在的行、按钮变了才重画
-            float xd = GET_X_LPARAM(l) / Scale(), yd = GET_Y_LPARAM(l) / Scale();
-            int row = HitRow(yd);
-            if (row >= d->items.n || HitEdge(GET_X_LPARAM(l), GET_Y_LPARAM(l))) row = -1;
-            int b = HitToolbar(xd, yd);
+            int row = HitRow(e.y);
+            if (row >= d->items.n || HitEdge(e.x, e.y)) row = -1;
+            int b = HitToolbar(e.x, e.y);
             if (row != hoverRow || b != hoverBtn || entered) { hoverRow = row; hoverBtn = b; Render(); }
         }
-        return 0;
+        return true;
     }
-    case WM_MOUSELEAVE:
+    case EvMouseLeave:
         hover = false;
         hoverRow = -1;
         hoverBtn = 0;
         if (d->collapsed) ScheduleCapsuleHide();
         else Render();
-        return 0;
-    case WM_MOUSEWHEEL:
+        return true;
+    case EvWheel:
     {
-        if (d->collapsed) return 0;
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        float H = rc.bottom / Scale();
+        if (d->collapsed) return true;
+        float H;
+        Wnd::ClientSize(win, nullptr, &H);
         float maxScroll = Max(0.f, contentHeight - (H - PadTop - PadBottom));
-        float ns = Clamp(scrollY - GET_WHEEL_DELTA_WPARAM(w) / 120.f * LineH(d) * 3, 0.f, maxScroll);
+        float ns = Clamp(scrollY - e.wheel * LineH(d) * 3, 0.f, maxScroll);
         if (ns != scrollY) { scrollY = ns; Render(); UpdateImePos(); }
-        return 0;
+        return true;
     }
-    case WM_RBUTTONUP:
-    {
-        POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
-        ClientToScreen(hwnd, &p);
-        OnContextMenu(p.x, p.y);
-        return 0;
-    }
-    case WM_CHAR:
-        if (Editing()) { EditChar((wchar_t)w); return 0; }
-        break;
-    case WM_IME_SETCONTEXT: case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_CHAR:
-    {
-        LRESULT r = 0;
-        if (EditIme(m, w, l, &r)) return r;
-        break;
-    }
-    case WM_KEYDOWN:
-    {
-        if (Editing()) { if (EditKey(w)) return 0; break; }
-        bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
-        if (ctrl && w == 'Z' && !shift) { Undo(); return 0; }
-        if (ctrl && (w == 'Y' || (w == 'Z' && shift))) { Redo(); return 0; }
-        break;
-    }
-    case WM_ACTIVATE:
-        if (LOWORD(w) == WA_INACTIVE)
+    case EvChar:
+        if (Editing()) { EditChar((wchar_t)e.ch); return true; }
+        return false;
+    case EvImeStart:
+        if (caret != anchor) EditInsert(Str(), 0);
+        UpdateImePos();
+        return true;
+    case EvImeUpdate:
+        if (e.hasResult)
         {
-            HWND to = (HWND)l;
-            (void)to;
+            compText = Str();
+            compCursor = 0;
+            if (e.imeResult.n) EditInsert(e.imeResult, 1);
+        }
+        if (e.hasComp)
+        {
+            compText = e.imeComp;
+            compCursor = Clamp(e.imeCursor, 0, compText.n);
+        }
+        else if (!e.hasResult) compText = Str();
+        EditUpdated();
+        return true;
+    case EvImeEnd:
+        compText = Str();
+        compCursor = 0;
+        EditUpdated();
+        return true;
+    case EvKeyDown:
+    {
+        if (Editing()) return EditKey(e.key, e.mods);
+        bool ctrl = (e.mods & ModCtrl) != 0, shift = (e.mods & ModShift) != 0;
+        if (ctrl && e.key == 'Z' && !shift) { Undo(); return true; }
+        if (ctrl && (e.key == 'Y' || (e.key == 'Z' && shift))) { Redo(); return true; }
+        return false;
+    }
+    case EvActivate:
+        if (!e.button)
+        {
             if (Editing()) CommitEdit(true);
             if (!Editing()) SendToBottom();
         }
-        return 0;
-    case WM_WINDOWPOSCHANGING:
-    {
-        WINDOWPOS* wp = (WINDOWPOS*)l;
-        if (d->mode == ModeDesktop && !Editing() && !peeking)
-        {
-            // 置底模式下（非编辑时）始终压在其他窗口下面
-            if (!(wp->flags & SWP_NOZORDER)) wp->hwndInsertAfter = HWND_BOTTOM;
-        }
-        if (sizing && !userResizing && !d->collapsed && !(wp->flags & SWP_NOSIZE))
-        {
-            // 只是拖着挪位置：系统想改大小（跨屏时按旧屏的像素摆窗口）就按便签自己的大小来
-            float S = Scale();
-            wp->cx = (int)(d->width * S + 0.5);
-            wp->cy = (int)(d->height * S + 0.5);
-        }
-        break;
-    }
-    case WM_ENTERSIZEMOVE:
-        sizing = true;
-        userResizing = false;
-        return 0;
-    case WM_SIZING:
-        userResizing = true;
-        break;
-    case WM_EXITSIZEMOVE:
-        sizing = false;
-        userResizing = false;
+        return true;
+    case EvMoveEnd:
         if (!d->collapsed) Render(); // 拖到缩放不同的屏上以后，按这块屏重新定大小
         SaveLayout();
-        return 0;
-    case WM_ACTIVATEAPP:
+        return true;
+    case EvAppActivate:
         // 点到别的程序：结束“临时提到最前”
-        if (!w && g_app->peeking) g_app->EndPeek();
-        break;
-    case WM_SIZE:
-        // 只在用户拖边框缩放时跟着改大小（创建窗口、挪位置、UpdateLayeredWindow 也会触发 WM_SIZE）
-        if (sizing && userResizing && !d->collapsed)
+        if (!e.button && g_app->peeking) g_app->EndPeek();
+        return false;
+    case EvUserResize:
+        if (!d->collapsed)
         {
             float S = Scale();
             int pw = (int)(d->width * S + 0.5), ph = (int)(d->height * S + 0.5);
-            int nw = LOWORD(l), nh = HIWORD(l);
-            if ((nw != pw || nh != ph) && nw > 0 && nh > 0)
+            if ((e.pw != pw || e.ph != ph) && e.pw > 0 && e.ph > 0)
             {
-                d->width = nw / S;
-                d->height = nh / S;
+                d->width = e.pw / S;
+                d->height = e.ph / S;
                 Render();
                 UpdateImePos();
             }
         }
-        return 0;
-    case WM_GETMINMAXINFO:
-        if (!d->collapsed)
-        {
-            MINMAXINFO* mm = (MINMAXINFO*)l;
-            mm->ptMinTrackSize.x = (int)(160 * Scale());
-            mm->ptMinTrackSize.y = (int)(120 * Scale());
-        }
-        return 0;
-    case WM_DPICHANGED:
-    {
+        return true;
+    case EvScale:
         CommitEdit(true);
-        RECT* r = (RECT*)l;
-        SetWindowPos(hwnd, nullptr, r->left, r->top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         Render();
-        return 0;
-    }
-    case WM_TIMER:
-        if (w == TimerCaret) { caretOn = !caretOn; Render(); }
-        else if (w == TimerFlash)
+        return true;
+    case EvTimer:
+        if (e.timer == TimerCaret) { caretOn = !caretOn; Render(); }
+        else if (e.timer == TimerFlash)
         {
-            if ((int)(GetTickCount() - flashUntil) >= 0)
+            if ((i64)(TickMs() - flashUntil) >= 0)
             {
-                KillTimer(hwnd, TimerFlash);
+                Wnd::KillTimer(win, TimerFlash);
                 flashUntil = 0;
                 if (!g_app->peeking) EndPeek();
             }
             Render();
         }
-        else if (w == TimerHide) OnHideTimer();
-        else if (w == TimerSlide)
+        else if (e.timer == TimerHide) OnHideTimer();
+        else if (e.timer == TimerSlide)
         {
-            float t = Min(1.f, (GetTickCount() - slideStart) / 150.f);
+            float t = Min(1.f, (TickMs() - slideStart) / 150.f);
             float k = 1 - (1 - t) * (1 - t) * (1 - t); // ease-out
-            SetWindowPos(hwnd, nullptr, slideFromX + (int)((slideToX - slideFromX) * k), slideFromY + (int)((slideToY - slideFromY) * k), 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            if (t >= 1) { KillTimer(hwnd, TimerSlide); sliding = false; }
+            Wnd::Move(win, slideFromX + (int)((slideToX - slideFromX) * k), slideFromY + (int)((slideToY - slideFromY) * k));
+            if (t >= 1) { Wnd::KillTimer(win, TimerSlide); sliding = false; }
         }
-        else if (w == TimerProgman)
-        {
-            if (d->mode != ModeDesktop) KillTimer(hwnd, TimerProgman);
-            else if (FindWindowW(L"Progman", nullptr)) AttachToDesktop();
-        }
-        return 0;
-    case WM_CLOSE:
-        return 0; // 只有退出程序或删除便签时才真正关闭
+        return true;
+    case EvClose:
+        return true; // 只有退出程序或删除便签时才真正关闭
     }
-    return DefWindowProcW(hwnd, m, w, l);
+    return false;
 }
 
 // =====================================================================

@@ -118,7 +118,7 @@ void App::DeleteNote(NoteWin* w, bool confirm)
     {
         Str msg = L"把便签「" + w->d->title + L"」（";
         msg.Int(w->d->items.n).Append(L" 条）移到回收站？\n之后可以在回收站里恢复。");
-        if (MessageBoxW(w->hwnd, msg.c(), L"删除便签", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+        if (MessageBoxW(Wnd::H(w->win), msg.c(), L"删除便签", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
     }
     w->CommitEdit(true);
     w->SaveLayout();
@@ -243,11 +243,11 @@ void App::TogglePeek()
 {
     if (peeking) { EndPeek(); return; }
     NoteWin* last = nullptr;
-    for (int i = 0; i < notes.n; i++) if (notes[i]->hwnd) last = notes[i]; // 隐藏的便签不参与
+    for (int i = 0; i < notes.n; i++) if (notes[i]->win) last = notes[i]; // 隐藏的便签不参与
     if (!last) return;
     peeking = true;
-    for (int i = 0; i < notes.n; i++) if (notes[i]->hwnd) notes[i]->BeginPeek();
-    SetForegroundWindow(last->hwnd);
+    for (int i = 0; i < notes.n; i++) if (notes[i]->win) notes[i]->BeginPeek();
+    SetForegroundWindow(Wnd::H(last->win));
 }
 
 void App::EndPeek()
@@ -257,7 +257,7 @@ void App::EndPeek()
     {
         NoteWin* w = notes[i];
         if (w->tempShown) { w->tempShown = false; w->Destroy(); } // 因提醒临时显示的隐藏便签：收回去
-        else if (w->hwnd) w->EndPeek();
+        else if (w->win) w->EndPeek();
     }
 }
 
@@ -493,7 +493,7 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l)
         case NIN_BALLOONUSERCLICK:
             if (g_app->balloonNote && g_app->notes.Contains(g_app->balloonNote))
             {
-                if (!g_app->balloonNote->hwnd) g_app->balloonNote->ShowTemporarily(); // 隐藏着：临时显示
+                if (!g_app->balloonNote->win) g_app->balloonNote->ShowTemporarily(); // 隐藏着：临时显示
                 g_app->balloonNote->Expand();
                 if (!g_app->peeking) g_app->TogglePeek();
             }

@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <imm.h>
 #include <shellapi.h>
+#include <commdlg.h>
 
 struct TextField
 {
@@ -27,11 +28,16 @@ struct Window
     float minW = 0, minH = 0;
     HWND owner = nullptr;
     Vec<TextField*> fields;
-    Canvas* canvas = nullptr;  // 弹出窗口：BeginPaint 到 EndPaint 之间
+    Canvas* canvas = nullptr;  // 弹出窗口、便签窗口：BeginPaint 到 EndPaint 之间
+    int kind = 0;              // 0 对话框，1 弹出窗口，2 便签窗口
+    int level = 0;             // 便签窗口的层级
+    bool peek = false;
+    bool moving = false, userResizing = false; // 在系统的拖动 / 改大小循环里；其中真的在拖边框
 };
 
 static const wchar_t* DialogClass = L"DeskNoteDialog";
 static const wchar_t* PopupClass = L"DeskNotePopup";
+static const wchar_t* NoteClass = L"DeskNoteNote";
 static Vec<Window*> g_dialogs; // 消息循环里要做对话框导航的窗口
 
 static float ScaleOf(Window* w) { return w->dpi / 96.f; }
@@ -306,6 +312,16 @@ static LRESULT CALLBACK PopupProc(HWND hw, UINT m, WPARAM wp, LPARAM lp)
     switch (m)
     {
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && w->h)
+        {
+            POINT p;
+            GetCursorPos(&p);
+            ScreenToClient(hw, &p);
+            Wnd::SetCursor((CursorShape)w->h->CursorAt(w, p.x / ScaleOf(w), p.y / ScaleOf(w)));
+            return TRUE;
+        }
+        break;
     case WM_TIMER:
         if (wp == TimerForeground)
         {
@@ -367,12 +383,13 @@ static LRESULT CALLBACK LoopMouseHook(int code, WPARAM wp, LPARAM lp)
 
 namespace Wnd
 {
-    Window* NewPopup(WinHandler* h, void* owner, int x, int y)
+    Window* NewPopup(WinHandler* h, void* owner, int x, int y, const Str& title)
     {
         Window* w = new Window();
         w->h = h;
         w->owner = (HWND)owner;
-        HWND hw = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, PopupClass, L"DeskNote 菜单", WS_POPUP,
+        w->kind = 1;
+        HWND hw = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, PopupClass, title.c(), WS_POPUP,
                                   x, y, 1, 1, (HWND)owner, nullptr, g_inst, w);
         if (!hw) { delete w; return nullptr; }
         w->dpi = GetDpiForWindow(hw);
@@ -448,6 +465,443 @@ namespace Wnd
         ReleaseCapture();
         g_loop = nullptr;
         g_loopRoot = nullptr;
+        if (owner) PostMessageW((HWND)owner, WM_NULL, 0, 0); // 老办法：让主人窗口的消息循环醒一下，菜单收起后前台状态才对
+    }
+}
+
+// =====================================================================
+// 便签窗口
+// =====================================================================
+enum { TimerProgman = 0x7F02 };
+static UINT g_taskbarCreated;
+
+// 置底：让桌面(Progman)成为所有者，Win+D 显示桌面时不会被藏起来；开机时桌面可能还没建好，就每 2 秒重试
+static void AttachToDesktop(Window* w)
+{
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    if (progman)
+    {
+        SetWindowLongPtrW(w->hwnd, GWLP_HWNDPARENT, (LONG_PTR)progman);
+        if (w->h && w->h->KeepAtBottom(w)) SetWindowPos(w->hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        ::KillTimer(w->hwnd, TimerProgman);
+        return;
+    }
+    ::SetTimer(w->hwnd, TimerProgman, 2000, nullptr);
+}
+
+static Str ImeString(HIMC imc, DWORD which)
+{
+    LONG bytes = ImmGetCompositionStringW(imc, which, nullptr, 0);
+    Str s;
+    if (bytes <= 0) return s;
+    s.Reserve(bytes / 2 + 1);
+    ImmGetCompositionStringW(imc, which, s.p, bytes);
+    s.n = bytes / 2;
+    s.p[s.n] = 0;
+    return s;
+}
+
+static LRESULT CALLBACK NoteProc(HWND hw, UINT m, WPARAM wp, LPARAM lp)
+{
+    Window* w = (Window*)GetWindowLongPtrW(hw, GWLP_USERDATA);
+    if (m == WM_NCCREATE)
+    {
+        w = (Window*)((CREATESTRUCTW*)lp)->lpCreateParams;
+        w->hwnd = hw;
+        SetWindowLongPtrW(hw, GWLP_USERDATA, (LONG_PTR)w);
+    }
+    if (!w) return DefWindowProcW(hw, m, wp, lp);
+    if (m == WM_NCDESTROY)
+    {
+        SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
+        delete w->canvas;
+        delete w;
+        return DefWindowProcW(hw, m, wp, lp);
+    }
+    if (!w->h) return DefWindowProcW(hw, m, wp, lp);
+    if (g_taskbarCreated && m == g_taskbarCreated)
+    {
+        // 资源管理器重启：重新挂到新的桌面窗口上
+        if (w->level == Wnd::LevelDesktop && !w->peek) AttachToDesktop(w);
+        return 0;
+    }
+    Event e;
+    switch (m)
+    {
+    case WM_NCHITTEST: return HTCLIENT;
+    case WM_MOUSEACTIVATE: return MA_ACTIVATE;
+    case WM_SETCURSOR:
+    {
+        POINT p;
+        GetCursorPos(&p);
+        ScreenToClient(hw, &p);
+        Wnd::SetCursor((CursorShape)w->h->CursorAt(w, p.x / ScaleOf(w), p.y / ScaleOf(w)));
+        return TRUE;
+    }
+    case WM_LBUTTONDOWN: MouseEvent(w, EvMouseDown, MouseLeft, 1, lp); return 0;
+    case WM_LBUTTONDBLCLK: MouseEvent(w, EvMouseDown, MouseLeft, 2, lp); return 0;
+    case WM_LBUTTONUP: MouseEvent(w, EvMouseUp, MouseLeft, 0, lp); return 0;
+    case WM_RBUTTONUP: MouseEvent(w, EvMouseUp, MouseRight, 0, lp); return 0;
+    case WM_CAPTURECHANGED:
+        if ((HWND)lp != hw) { e.type = EvCaptureLost; Send(w, e); }
+        return 0;
+    case WM_MOUSEMOVE:
+        if (!w->tracking)
+        {
+            TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, hw, 0 };
+            TrackMouseEvent(&t);
+            w->tracking = true;
+        }
+        MouseEvent(w, EvMouseMove, 0, 0, lp);
+        return 0;
+    case WM_MOUSELEAVE:
+        w->tracking = false;
+        e.type = EvMouseLeave;
+        Send(w, e);
+        return 0;
+    case WM_MOUSEWHEEL:
+    {
+        POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(hw, &p);
+        e.type = EvWheel;
+        e.wheel = GET_WHEEL_DELTA_WPARAM(wp) / 120.f;
+        e.x = p.x / ScaleOf(w);
+        e.y = p.y / ScaleOf(w);
+        e.mods = CurrentMods();
+        Send(w, e);
+        return 0;
+    }
+    case WM_CHAR:
+        e.type = EvChar;
+        e.ch = (u32)wp;
+        if (Send(w, e)) return 0;
+        break;
+    case WM_KEYDOWN:
+        e.type = EvKeyDown;
+        e.key = (int)wp;
+        e.mods = CurrentMods();
+        if (Send(w, e)) return 0;
+        break;
+    case WM_IME_SETCONTEXT:
+        // 组字自己画：不要系统的组字窗口
+        if (w->h->WantsIme(w)) return DefWindowProcW(hw, m, wp, lp & ~ISC_SHOWUICOMPOSITIONWINDOW);
+        break;
+    case WM_IME_STARTCOMPOSITION:
+        if (!w->h->WantsIme(w)) break;
+        e.type = EvImeStart;
+        Send(w, e);
+        return 0;
+    case WM_IME_COMPOSITION:
+    {
+        if (!w->h->WantsIme(w)) break;
+        e.type = EvImeUpdate;
+        HIMC imc = ImmGetContext(hw);
+        if (imc)
+        {
+            if (lp & GCS_RESULTSTR) { e.hasResult = true; e.imeResult = ImeString(imc, GCS_RESULTSTR); }
+            if (lp & GCS_COMPSTR)
+            {
+                e.hasComp = true;
+                e.imeComp = ImeString(imc, GCS_COMPSTR);
+                LONG cur = (lp & GCS_CURSORPOS) ? ImmGetCompositionStringW(imc, GCS_CURSORPOS, nullptr, 0) : e.imeComp.n;
+                e.imeCursor = (int)LOWORD(cur);
+            }
+            ImmReleaseContext(hw, imc);
+        }
+        Send(w, e);
+        return 0;
+    }
+    case WM_IME_ENDCOMPOSITION:
+        if (!w->h->WantsIme(w)) break;
+        e.type = EvImeEnd;
+        Send(w, e);
+        return 0;
+    case WM_IME_CHAR:
+        if (w->h->WantsIme(w)) return 0; // 结果已经在 WM_IME_COMPOSITION 里交出去了
+        break;
+    case WM_ACTIVATE:
+        e.type = EvActivate;
+        e.button = LOWORD(wp) != WA_INACTIVE;
+        Send(w, e);
+        return 0;
+    case WM_WINDOWPOSCHANGING:
+    {
+        WINDOWPOS* pos = (WINDOWPOS*)lp;
+        // 置底模式下（非编辑时）始终压在其他窗口下面
+        if (w->h->KeepAtBottom(w) && !(pos->flags & SWP_NOZORDER)) pos->hwndInsertAfter = HWND_BOTTOM;
+        float kw, kh;
+        if (w->moving && !w->userResizing && !(pos->flags & SWP_NOSIZE) && w->h->KeepSizeOnMove(w, &kw, &kh))
+        {
+            // 只是拖着挪位置：系统想改大小（跨屏时按旧屏的像素摆窗口）就按窗口自己的大小来
+            float S = ScaleOf(w);
+            pos->cx = (int)(kw * S + 0.5);
+            pos->cy = (int)(kh * S + 0.5);
+        }
+        break;
+    }
+    case WM_ENTERSIZEMOVE:
+        w->moving = true;
+        w->userResizing = false;
+        e.type = EvMoveStart;
+        Send(w, e);
+        return 0;
+    case WM_SIZING:
+        w->userResizing = true;
+        break;
+    case WM_EXITSIZEMOVE:
+        w->moving = false;
+        w->userResizing = false;
+        e.type = EvMoveEnd;
+        Send(w, e);
+        return 0;
+    case WM_ACTIVATEAPP:
+        e.type = EvAppActivate;
+        e.button = wp != 0;
+        Send(w, e);
+        break;
+    case WM_SIZE:
+        // 只在用户拖边框缩放时告诉便签（创建窗口、挪位置、UpdateLayeredWindow 也会触发 WM_SIZE）
+        if (w->moving && w->userResizing)
+        {
+            e.type = EvUserResize;
+            e.pw = LOWORD(lp);
+            e.ph = HIWORD(lp);
+            Send(w, e);
+        }
+        return 0;
+    case WM_GETMINMAXINFO:
+    {
+        float mw, mh;
+        if (w->h->MinSize(w, &mw, &mh))
+        {
+            MINMAXINFO* mm = (MINMAXINFO*)lp;
+            mm->ptMinTrackSize.x = (int)(mw * ScaleOf(w));
+            mm->ptMinTrackSize.y = (int)(mh * ScaleOf(w));
+        }
+        return 0;
+    }
+    case WM_DPICHANGED:
+    {
+        RECT* r = (RECT*)lp;
+        SetWindowPos(hw, nullptr, r->left, r->top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        e.type = EvScale;
+        Send(w, e);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == TimerProgman)
+        {
+            if (w->level != Wnd::LevelDesktop) ::KillTimer(hw, TimerProgman);
+            else if (FindWindowW(L"Progman", nullptr)) AttachToDesktop(w);
+            return 0;
+        }
+        e.type = EvTimer;
+        e.timer = (int)wp;
+        Send(w, e);
+        return 0;
+    case WM_CLOSE:
+        e.type = EvClose;
+        if (!Send(w, e)) DestroyWindow(hw);
+        return 0;
+    case WM_DESTROY:
+        e.type = EvDestroy;
+        Send(w, e);
+        w->h = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hw, m, wp, lp);
+}
+
+namespace Wnd
+{
+    Window* NewNoteWindow(WinHandler* h, const Str& title, int x, int y)
+    {
+        static bool registered;
+        if (!registered)
+        {
+            // 程序图标加载好以后才注册（普通窗口模式时任务栏要用）
+            registered = true;
+            WNDCLASSW wc = {};
+            wc.style = CS_DBLCLKS;
+            wc.lpfnWndProc = NoteProc;
+            wc.hInstance = g_inst;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hIcon = g_app->icon;
+            wc.lpszClassName = NoteClass;
+            RegisterClassW(&wc);
+            g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+        }
+        Window* w = new Window();
+        w->h = h;
+        w->kind = 2;
+        HWND hw = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, NoteClass, title.c(), WS_POPUP, x, y, 10, 10, nullptr, nullptr, g_inst, w);
+        if (!hw) { delete w; return nullptr; }
+        w->dpi = GetDpiForWindow(hw);
+        return w;
+    }
+
+    void SetLevel(Window* w, int level, bool peeking)
+    {
+        HWND hw = w->hwnd;
+        w->level = level;
+        w->peek = peeking;
+        LONG_PTR ex = GetWindowLongPtrW(hw, GWL_EXSTYLE);
+        if (level == LevelNormal) ex = (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW; // 进任务栏和 Alt+Tab
+        else ex = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+        SetWindowLongPtrW(hw, GWL_EXSTYLE, ex);
+        if (level == LevelDesktop)
+        {
+            SetWindowPos(hw, peeking ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (!peeking) AttachToDesktop(w);
+        }
+        else
+        {
+            SetWindowLongPtrW(hw, GWLP_HWNDPARENT, 0);
+            SetWindowPos(hw, level == LevelTopmost || peeking ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        SetWindowPos(hw, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    void PeekToTop(Window* w)
+    {
+        w->peek = true;
+        // 挂在桌面窗口下的便签设不了置顶，先摘下来，结束时再挂回去
+        SetWindowLongPtrW(w->hwnd, GWLP_HWNDPARENT, 0);
+        SetWindowPos(w->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    void ToBottom(Window* w) { SetWindowPos(w->hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
+    void SetTitle(Window* w, const Str& title) { SetWindowTextW(w->hwnd, title.c()); }
+    void Move(Window* w, int x, int y)
+    {
+        if (w->kind == 1) SetWindowPos(w->hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        else SetWindowPos(w->hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    void Hide(Window* w) { ShowWindow(w->hwnd, SW_HIDE); }
+    void Activate(Window* w) { SetForegroundWindow(w->hwnd); SetFocus(w->hwnd); }
+    void DragMove(Window* w)
+    {
+        ReleaseCapture();
+        SendMessageW(w->hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    }
+    void DragResize(Window* w, int edge)
+    {
+        ReleaseCapture();
+        SendMessageW(w->hwnd, WM_SYSCOMMAND, 0xF000 + edge, 0);
+    }
+
+    // ---- 屏幕 ----
+    bool OnScreen(int x, int y)
+    {
+        POINT p = { x, y };
+        return MonitorFromPoint(p, MONITOR_DEFAULTTONULL) != nullptr;
+    }
+    bool ScreenOf(RectI r, RectI* workArea)
+    {
+        RECT rc = { r.left, r.top, r.right, r.bottom };
+        HMONITOR mon = MonitorFromRect(&rc, MONITOR_DEFAULTTONULL);
+        MONITORINFO mi = { sizeof(mi) };
+        if (!mon || !GetMonitorInfoW(mon, &mi)) return false;
+        if (workArea) { workArea->left = mi.rcWork.left; workArea->top = mi.rcWork.top; workArea->right = mi.rcWork.right; workArea->bottom = mi.rcWork.bottom; }
+        return true;
+    }
+    RectI PrimaryWorkArea()
+    {
+        POINT p0 = { 0, 0 };
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfoW(MonitorFromPoint(p0, MONITOR_DEFAULTTOPRIMARY), &mi);
+        RectI r = { mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom };
+        return r;
+    }
+    PointI CursorScreen()
+    {
+        POINT p;
+        GetCursorPos(&p);
+        PointI o = { p.x, p.y };
+        return o;
+    }
+
+    // ---- 输入法和系统光标 ----
+    void ImeAttach(Window* w, float caretH) { CreateCaret(w->hwnd, nullptr, 1, (int)(caretH * ScaleOf(w))); }
+    void ImeDetach(Window*) { DestroyCaret(); }
+    void ImeSetCaret(Window* w, RectF c)
+    {
+        float S = ScaleOf(w);
+        POINT p = { (LONG)(c.left * S), (LONG)(c.top * S) };
+        LONG bottom = (LONG)(c.bottom * S);
+        SetCaretPos(p.x, p.y);
+        HIMC imc = ImmGetContext(w->hwnd);
+        if (!imc) return;
+        COMPOSITIONFORM cf = {};
+        cf.dwStyle = CFS_POINT;
+        cf.ptCurrentPos = p;
+        ImmSetCompositionWindow(imc, &cf);
+        CANDIDATEFORM cand = {};
+        cand.dwIndex = 0;
+        cand.dwStyle = CFS_EXCLUDE;
+        cand.ptCurrentPos.x = p.x;
+        cand.ptCurrentPos.y = bottom;
+        cand.rcArea.left = p.x;
+        cand.rcArea.top = p.y;
+        cand.rcArea.right = p.x + 1;
+        cand.rcArea.bottom = bottom;
+        ImmSetCandidateWindow(imc, &cand);
+        ImmReleaseContext(w->hwnd, imc);
+    }
+    void ImeFinish(Window* w, bool cancel)
+    {
+        HIMC imc = ImmGetContext(w->hwnd);
+        if (!imc) return;
+        ImmNotifyIME(imc, NI_COMPOSITIONSTR, cancel ? CPS_CANCEL : CPS_COMPLETE, 0);
+        ImmReleaseContext(w->hwnd, imc);
+    }
+    int CaretBlinkMs() { return (int)GetCaretBlinkTime(); }
+
+    // ---- 剪贴板、选颜色 ----
+    void ClipboardSet(const Str& s)
+    {
+        Str t = s.Replace(L"\n", L"\r\n");
+        if (!OpenClipboard(nullptr)) return;
+        EmptyClipboard();
+        HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (t.n + 1) * sizeof(wchar_t));
+        if (g)
+        {
+            wchar_t* p = (wchar_t*)GlobalLock(g);
+            for (int i = 0; i < t.n; i++) p[i] = t.p[i];
+            p[t.n] = 0;
+            GlobalUnlock(g);
+            if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
+        }
+        CloseClipboard();
+    }
+    Str ClipboardText()
+    {
+        Str s;
+        if (!OpenClipboard(nullptr)) return s;
+        HANDLE g = GetClipboardData(CF_UNICODETEXT);
+        if (g)
+        {
+            const wchar_t* p = (const wchar_t*)GlobalLock(g);
+            if (p) s = p;
+            GlobalUnlock(g);
+        }
+        CloseClipboard();
+        // 去掉控制字符（换行、Tab 保留）
+        Str out;
+        for (int i = 0; i < s.n; i++) if (s.p[i] >= 32 || s.p[i] == L'\n' || s.p[i] == L'\r' || s.p[i] == L'\t') out.Ch(s.p[i]);
+        return out;
+    }
+    bool ClipboardHasText() { return IsClipboardFormatAvailable(CF_UNICODETEXT) != FALSE; }
+    bool PickColor(Window* owner, u32* rgb)
+    {
+        static COLORREF custom[16];
+        u32 cur = *rgb;
+        CHOOSECOLORW cc = { sizeof(cc) };
+        cc.hwndOwner = owner ? owner->hwnd : nullptr;
+        cc.rgbResult = RGB((cur >> 16) & 255, (cur >> 8) & 255, cur & 255);
+        cc.lpCustColors = custom;
+        cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+        if (!ChooseColorW(&cc)) return false;
+        *rgb = (GetRValue(cc.rgbResult) << 16) | (GetGValue(cc.rgbResult) << 8) | GetBValue(cc.rgbResult);
+        return true;
     }
 }
 
@@ -466,6 +920,7 @@ namespace Wnd
         wc.lpfnWndProc = PopupProc;
         wc.lpszClassName = PopupClass;
         RegisterClassW(&wc);
+
     }
 
     bool PreTranslate(MSG* msg)
@@ -559,10 +1014,17 @@ namespace Wnd
     }
     PointI ToScreen(Window* w, float x, float y)
     {
-        POINT p = { (LONG)(x * ScaleOf(w)), (LONG)(y * ScaleOf(w)) };
+        POINT p = { (LONG)(x * ScaleOf(w) + 0.5f), (LONG)(y * ScaleOf(w) + 0.5f) };
         ClientToScreen(w->hwnd, &p);
         PointI o = { p.x, p.y };
         return o;
+    }
+    void FromScreen(Window* w, int sx, int sy, float* x, float* y)
+    {
+        POINT p = { sx, sy };
+        ScreenToClient(w->hwnd, &p);
+        *x = p.x / ScaleOf(w);
+        *y = p.y / ScaleOf(w);
     }
     bool CursorPos(Window* w, float* x, float* y)
     {

@@ -564,7 +564,7 @@ static MenuLevel* OpenLevel(Menu* m, int parentItem, int ax, int ay, int flipX, 
     MenuLevel* lv = new MenuLevel();
     lv->m = m;
     lv->parentItem = parentItem;
-    lv->win = Wnd::NewPopup(&g_menuWin, s->owner, ax, ay);
+    lv->win = Wnd::NewPopup(&g_menuWin, s->owner, ax, ay, Str(L"DeskNote 菜单"));
     lv->S = Wnd::Scale(lv->win);
     LayoutLevel(lv);
     float S = lv->S;
