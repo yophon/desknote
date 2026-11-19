@@ -88,6 +88,9 @@ public:
     void TestMenuDelete(int index);
     void TestToggleDone(int index);
     void TestSetRemind(int index, Time t, int repeat = 0);
+    bool TestCheckPoint(int index, float* x, float* y); // 第 index 条勾选框的中心（窗口 DIP）
+    bool TestDocked() const { return dockL || dockR || dockT || dockB; }
+    bool TestCapHidden() const { return capHidden; }
 
     static const int NotEditing = -1, TitleIndex = -2;
     // 窗口事件（window.h）

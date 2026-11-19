@@ -477,6 +477,115 @@ static void Phase1(const Str& server, const Str& key)
 
     if (server.n) SyncTests(server, key);
 
+    // ---- 交互：直接给窗口发系统消息（不动真鼠标、不抢焦点），走完整的「系统消息 → 事件 → 逻辑」 ----
+    {
+        bool keepFocus = NoteWin::debugNoFocus;
+        NoteWin::debugNoFocus = true;
+        app->CreateNoteFromContent(app->notes[0]->d->ContentJson(), L"（交互测试）");
+        NoteWin* t = app->notes.Last();
+        t->CommitEdit(true);
+        HWND h = Wnd::H(t->win);
+        // 单击勾选框
+        t->d->checkboxes = true;
+        t->Render();
+        float cx, cy;
+        bool hasRow = t->d->items.n > 0 && t->TestCheckPoint(0, &cx, &cy);
+        bool before = hasRow && t->d->items[0].done;
+        if (hasRow)
+        {
+            float S = GetDpiForWindow(h) / 96.f;
+            LPARAM lp = MAKELPARAM((int)(cx * S), (int)(cy * S));
+            SendMessageW(h, WM_LBUTTONDOWN, MK_LBUTTON, lp);
+            SendMessageW(h, WM_LBUTTONUP, 0, lp);
+        }
+        Check(L"交互：单击勾选框勾上", hasRow && t->d->items[0].done != before);
+        // 编辑时打字（WM_CHAR）
+        t->BeginEdit(t->d->items.n);
+        const wchar_t* typed = L"打字测试 ok";
+        for (const wchar_t* p = typed; *p; p++) SendMessageW(h, WM_CHAR, *p, 0);
+        t->CommitEdit(true);
+        Check(L"交互：编辑时打字", HasItem(t->d, typed), Texts(t->d));
+        // 输入法：组字时不进文字，上屏后才进
+        t->BeginEdit(t->d->items.n);
+        Event e;
+        e.type = EvImeStart;
+        t->OnEvent(t->win, e);
+        Event c;
+        c.type = EvImeUpdate;
+        c.hasComp = true;
+        c.imeComp = L"nihao";
+        c.imeCursor = 5;
+        t->OnEvent(t->win, c);
+        Event r;
+        r.type = EvImeUpdate;
+        r.hasResult = true;
+        r.imeResult = L"你好";
+        t->OnEvent(t->win, r);
+        Event en;
+        en.type = EvImeEnd;
+        t->OnEvent(t->win, en);
+        t->CommitEdit(true);
+        Check(L"交互：输入法上屏的字进了条目，组字没进", HasItem(t->d, L"你好") && !HasItem(t->d, L"nihao你好"), Texts(t->d));
+
+        // 跨屏：直接挪到别的屏、在拖动循环里挪过去，窗口都要按那块屏的缩放比例
+        struct Mons { RECT r[8]; RECT work[8]; int n; } mons = {};
+        EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT rc, LPARAM l) -> BOOL {
+            Mons* ms = (Mons*)l;
+            MONITORINFO mi = { sizeof(mi) };
+            GetMonitorInfoW(m, &mi);
+            if (ms->n < 8) { ms->r[ms->n] = *rc; ms->work[ms->n] = mi.rcWork; ms->n++; }
+            return TRUE;
+        }, (LPARAM)&mons);
+        bool scaleOk = true;
+        Str detail;
+        for (int i = 0; i < mons.n; i++)
+        {
+            for (int loop = 0; loop < 2; loop++)
+            {
+                if (loop) SendMessageW(h, WM_ENTERSIZEMOVE, 0, 0);
+                SetWindowPos(h, nullptr, mons.r[i].left + 120, mons.r[i].top + 120, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                if (loop) SendMessageW(h, WM_EXITSIZEMOVE, 0, 0);
+                Pump(100);
+                RECT wr;
+                GetWindowRect(h, &wr);
+                int want = (int)(t->d->width * GetDpiForWindow(h) / 96.0 + 0.5);
+                if (wr.right - wr.left != want)
+                {
+                    scaleOk = false;
+                    detail.Append(L"屏").Int(i).Append(loop ? L"（拖动中）" : L"").Append(L" 宽=").Int(wr.right - wr.left).Append(L" 应为=").Int(want).Append(L"；");
+                }
+            }
+        }
+        Check(L"交互：挪到别的屏后按那块屏的缩放比例画", scaleOk, detail);
+
+        // 胶囊：离屏幕右边很近时贴边，到时间后缩进去（右边挨着别的屏时不缩）
+        if (mons.n > 0)
+        {
+            RECT wa = mons.work[0];
+            RECT wr;
+            GetWindowRect(h, &wr);
+            SetWindowPos(h, nullptr, wa.right - (wr.right - wr.left) - 5, wa.top + 200, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            t->Collapse();
+            Pump(100);
+            GetWindowRect(h, &wr);
+            Check(L"交互：胶囊靠近右边就贴上去", t->TestDocked() && wr.right == wa.right, Num(wa.right - wr.right));
+            POINT cur;
+            GetCursorPos(&cur);
+            bool cursorOver = PtInRect(&wr, cur) != FALSE;
+            bool neighbor = Wnd::OnScreen(wa.right + 2, (wr.top + wr.bottom) / 2);
+            SendMessageW(h, WM_TIMER, 1, 0); // 胶囊收起的定时器
+            Pump(400);
+            GetWindowRect(h, &wr);
+            if (cursorOver || neighbor) Check(L"交互：贴边胶囊到时间缩进去（跳过：鼠标在上面或右边挨着别的屏）", true);
+            else Check(L"交互：贴边胶囊到时间缩进去", t->TestCapHidden() && wr.left >= wa.right - 10, Num(wa.right - wr.left));
+            t->Expand();
+            Check(L"交互：缩进的胶囊能展开", !t->d->collapsed && t->win != nullptr);
+        }
+        app->DeleteNote(t, false);
+        Pump(200);
+        NoteWin::debugNoFocus = keepFocus;
+    }
+
     // ---- 每块屏上：窗口大小 = 便签大小 × 那块屏的缩放比例（便签先建在主屏再挪过去，曾按主屏的比例画）----
     {
         struct Mons { RECT r[8]; int n; } mons = {};

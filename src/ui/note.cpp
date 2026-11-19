@@ -2111,6 +2111,18 @@ void NoteWin::TestToggleDone(int index)
     EndChange();
     Save();
 }
+bool NoteWin::TestCheckPoint(int index, float* x, float* y)
+{
+    for (int i = 0; i < rows.n; i++)
+        if (rows[i].index == index)
+        {
+            *x = PadX + CheckSize(d) / 2;
+            *y = rows[i].top - scrollY + LineH(d) / 2;
+            return d->checkboxes;
+        }
+    return false;
+}
+
 void NoteWin::TestSetRemind(int index, Time t, int repeat)
 {
     BeginChange();
