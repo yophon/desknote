@@ -88,6 +88,18 @@ struct JParser
                 int v = 0;
                 for (int k = 0; k < 4; k++) { int h = Hex(s[i + k]); if (h < 0) return false; v = v * 16 + h; }
                 i += 4;
+                // 😀 这样成对的代理拼回一个字（wchar_t 是 32 位的平台上要拼；16 位的拼完再拆，结果一样）
+                if (v >= 0xD800 && v <= 0xDBFF && i + 6 <= n && s[i] == L'\\' && s[i + 1] == L'u')
+                {
+                    int lo = 0;
+                    for (int k = 0; k < 4 && lo >= 0; k++) { int h = Hex(s[i + 2 + k]); lo = h < 0 ? -1 : lo * 16 + h; }
+                    if (lo >= 0xDC00 && lo <= 0xDFFF)
+                    {
+                        i += 6;
+                        out.CodePoint(0x10000 + ((u32)(v - 0xD800) << 10) + (u32)(lo - 0xDC00));
+                        break;
+                    }
+                }
                 out.Ch((wchar_t)v);
                 break;
             }

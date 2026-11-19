@@ -23,21 +23,29 @@ Windows 桌面便签：半透明待办清单，可置底在桌面 / 置顶 / 普
 
 C 风格 C++，不带 C 运行库（自己的内存、字符串、JSON），Direct2D + DirectWrite 软件渲染，绘图对象空闲几秒后整体释放。
 
+代码分两层，为以后出 macOS、Linux 版做准备：`src/core` 是跨平台的核心，不引用任何系统头文件；系统相关的都在平台目录里。
+
 | 文件 | 内容 |
 |---|---|
-| `src/rt.*` | 最小运行时：内存、动态数组、字符串、时间、文件 |
-| `src/json.*` | JSON 解析和写出 |
-| `src/store.*` | 便签、回收站、设置的读写，每日备份 |
-| `src/note.cpp` | 便签窗口：绘制、编辑、排序、撤销、胶囊、右键菜单 |
-| `src/ui.*` | 自绘界面共用部分：主题、画布、弹出菜单 |
-| `src/dialogs.cpp` | 设置、回收站、设置提醒 |
-| `src/sync.cpp` | gopan 同步 |
-| `src/app.cpp` | 入口、托盘、快捷键、开机自启、文件监视 |
-| `src/selftest.cpp` | 自测和内存诊断 |
+| `src/core/rt.*` | 最小运行时：内存、动态数组、字符串（wchar_t，Windows 上 UTF-16、其他系统 UTF-32）、UTF-8、时间换算、文件、SHA-256 |
+| `src/core/plat.h` | 平台层接口：线程、原子操作、HTTP、密钥保护（rt.h 里标着「各平台实现」的文件、时钟函数也算） |
+| `src/core/json.*` | JSON 解析和写出 |
+| `src/core/store.*` | 便签、回收站、设置的读写，每日备份 |
+| `src/core/syncengine.*` | 同步引擎：gopan MCP 客户端、同步状态、一轮同步的计算、三方合并、实时推送连接 |
+| `src/core/links.*` | 条目里的链接识别 |
+| `src/win/plat_win.cpp` | 平台层的 Windows 实现（WinHTTP、DPAPI 等）；`crt_win.cpp` 替代 C 运行库 |
+| `src/win/note.cpp` | 便签窗口：绘制、编辑、排序、撤销、胶囊、右键菜单 |
+| `src/win/ui.*` | 自绘界面共用部分：主题、画布、弹出菜单 |
+| `src/win/dialogs.cpp` | 设置、回收站、设置提醒、便签管理 |
+| `src/win/sync.cpp` | 同步调度：什么时候同步、同步完怎么改便签窗口 |
+| `src/win/app.cpp` | 入口、托盘、快捷键、开机自启、文件监视 |
+| `src/win/selftest.cpp` | 自测和内存诊断 |
+| `src/posix/plat_posix.cpp` | 平台层的 macOS / Linux 实现（还没接 HTTP 和密钥保存） |
 
 ## 测试与调试
 
 - 回归测试：`powershell -NoProfile -ExecutionPolicy Bypass -File tests\selftest.ps1`（编译到临时目录，用临时数据跑两轮自测；有 python 时连 `tests\mock_gopan.py` 测同步）
+- 核心测试（只测 `src/core`，各平台同一套）：Windows `tests\coretest.cmd`；Linux / macOS `sh tests/coretest.sh`（要 C++17 编译器）
 - 独立数据目录：`DeskNote.exe --data <目录>`（不影响正在用的便签，也不改开机自启）
 - 内存诊断：`DeskNote.exe --data <测试目录> --memdiag <结果文件>`
 - 直接打开界面：`--open trash|settings|reminder|edit|capsule|preview|hover|menu|menu1|menu2|traymenu`；`--theme light|dark` 强制深浅色

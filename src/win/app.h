@@ -1,13 +1,12 @@
 // 程序共用的声明：程序主体、便签窗口、绘图资源、对话框、同步
 #pragma once
-#include "rt.h"
+#include "win.h"
 #include "store.h"
+#include "links.h"
 #include <d2d1.h>
 #include <dwrite.h>
 
 namespace Ui { struct Menu; }
-
-#define APP_VERSION L"2.0.0"
 
 // 项目和 gopan 的链接（设置页「关于」里打开）；gopan 网页也是同步的默认服务器
 #define URL_DESKNOTE_REPO L"https://github.com/yophon/desknote"
@@ -302,9 +301,6 @@ bool HotkeyParse(const Str& s, UINT* mods, UINT* vk);
 Str HotkeyFormat(UINT mods, UINT vk);
 void RegisterDialogClasses();
 
-// 链接
-struct LinkSpan { int start, len; Str url; };
-void FindLinks(const Str& text, Vec<LinkSpan>& out);
 
 // 自测（selftest.cpp）
 void SelfTestRun(const Str& phase, const Str& outFile, const Str& server, const Str& key);

@@ -1,5 +1,5 @@
 #include "store.h"
-#include <wincrypt.h>
+#include "plat.h"
 
 static Str ColorStr(u32 c)
 {
@@ -46,10 +46,10 @@ bool NoteItem::From(JVal* v, NoteItem* out)
 // ---- 便签 ----
 Str NoteData::NewId()
 {
-    SYSTEMTIME st;
-    GetLocalTime(&st);
+    DateTime st;
+    LocalNow(&st);
     Str s;
-    s.Int(st.wYear).Pad2(st.wMonth).Pad2(st.wDay).Ch(L'-').Pad2(st.wHour).Pad2(st.wMinute).Pad2(st.wSecond).Ch(L'-');
+    s.Int(st.year).Pad2(st.month).Pad2(st.day).Ch(L'-').Pad2(st.hour).Pad2(st.minute).Pad2(st.second).Ch(L'-');
     u32 r = RandomU32();
     u8 b[3] = { (u8)(r >> 16), (u8)(r >> 8), (u8)r };
     s += HexOf(b, 3);
@@ -218,28 +218,26 @@ namespace Store
 
     void LoadNotes(Vec<NoteData*>& out)
     {
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(PathJoin(NotesDir, L"*.json").c(), &fd);
-        if (h == INVALID_HANDLE_VALUE) return;
-        do
+        Vec<DirEntry> files;
+        ListDir(NotesDir.c(), files);
+        for (int fi = 0; fi < files.n; fi++)
         {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            Str name(fd.cFileName);
+            if (files[fi].isDir) continue;
+            const Str& name = files[fi].name;
             if (!name.EndsWith(L".json")) continue;
             Str id = name.Sub(0, name.n - 5);
             Str content;
-            if (!ReadFileText(PathJoin(NotesDir, fd.cFileName).c(), &content)) continue;
+            if (!ReadFileText(PathJoin(NotesDir, name.c()).c(), &content)) continue;
             JVal* j = JParse(content);
             NoteData* n = NoteData::From(j, id);
             delete j;
             if (!n) { Log(L"读取便签失败 " + name); continue; }
             SetWritten(id, content);
             out.Push(n);
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+        }
         // 按 id 排序（id 以创建时间开头）
         for (int i = 1; i < out.n; i++)
-            for (int k = i; k > 0 && CompareStringOrdinal(out.p[k - 1]->id.c(), -1, out.p[k]->id.c(), -1, FALSE) == CSTR_GREATER_THAN; k--)
+            for (int k = i; k > 0 && WCmp(out.p[k - 1]->id.c(), out.p[k]->id.c()) > 0; k--)
                 Swap(out.p[k - 1], out.p[k]);
     }
 
@@ -258,7 +256,7 @@ namespace Store
     void DeleteNoteFile(const Str& id)
     {
         if (!deleted.Contains(id)) deleted.Push(id);
-        DeleteFileW(NotePath(id).c());
+        RemoveFile(NotePath(id).c());
         ForgetWritten(id);
     }
     void Revive(const Str& id) { deleted.Remove(id); }
@@ -274,7 +272,7 @@ namespace Store
             if (!ok)
             {
                 if (!FileExists(NotePath(id).c())) return nullptr;
-                Sleep(80); // 对方可能还没写完
+                SleepMs(80); // 对方可能还没写完
             }
         }
         if (!ok) return nullptr;
@@ -313,43 +311,7 @@ namespace Store
         delete o;
     }
 
-    // 密钥用 DPAPI 加密：只有当前 Windows 用户能解开（和 WPF 版的 ProtectedData 兼容）
-    static Str Protect(const Str& plain)
-    {
-        if (plain.Empty()) return Str();
-        Bytes b = ToUtf8(plain);
-        DATA_BLOB in = { (DWORD)b.n, (BYTE*)b.p }, out = {};
-        if (!CryptProtectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return Str();
-        DWORD len = 0;
-        CryptBinaryToStringW(out.pbData, out.cbData, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &len);
-        Str s;
-        s.Reserve(len);
-        CryptBinaryToStringW(out.pbData, out.cbData, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, s.p, &len);
-        s.n = (int)len;
-        s.p[s.n] = 0;
-        LocalFree(out.pbData);
-        return L"dpapi:" + s;
-    }
-    static Str Unprotect(const Str& s)
-    {
-        if (!s.StartsWith(L"dpapi:")) return Str();
-        Str b64 = s.Sub(6);
-        DWORD len = 0;
-        if (!CryptStringToBinaryW(b64.c(), b64.n, CRYPT_STRING_BASE64, nullptr, &len, nullptr, nullptr)) return Str();
-        BYTE* buf = (BYTE*)MemAlloc(len);
-        CryptStringToBinaryW(b64.c(), b64.n, CRYPT_STRING_BASE64, buf, &len, nullptr, nullptr);
-        DATA_BLOB in = { len, buf }, out = {};
-        Str r;
-        if (CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
-        {
-            r = FromUtf8((const char*)out.pbData, (int)out.cbData);
-            LocalFree(out.pbData);
-        }
-        else Log(L"解不开保存的同步密钥（换了电脑或用户？）");
-        MemFree(buf);
-        return r;
-    }
-
+    // 同步密钥交给平台层加密保存（Windows 是 DPAPI，和 WPF 版兼容）
     Settings LoadSettings()
     {
         Settings s;
@@ -364,7 +326,7 @@ namespace Store
         s.syncServer = d->Str_(L"syncServer", DefaultSyncServer);
         if (s.syncServer.Trim().Empty()) s.syncServer = DefaultSyncServer; // 留空 = 用默认的 gopan
         s.syncFolder = d->Str_(L"syncFolder", s.syncFolder.c());
-        s.syncKey = Unprotect(d->Str_(L"syncKey", L""));
+        s.syncKey = Plat::Unprotect(d->Str_(L"syncKey", L""));
         s.hardwareRender = d->Bool(L"hardwareRender", false);
         delete d;
         return s;
@@ -374,7 +336,7 @@ namespace Store
         JVal* o = JNewObj();
         o->SetBool(L"hotkeyEnabled", s.hotkeyEnabled)->SetStr(L"hotkey", s.hotkey)->SetBool(L"autoStartInit", s.autoStartInit)
             ->SetBool(L"syncEnabled", s.syncEnabled)->SetStr(L"syncServer", s.syncServer)->SetStr(L"syncFolder", s.syncFolder)
-            ->SetStr(L"syncKey", Protect(s.syncKey))->SetBool(L"hardwareRender", s.hardwareRender);
+            ->SetStr(L"syncKey", Plat::Protect(s.syncKey))->SetBool(L"hardwareRender", s.hardwareRender);
         if (!WriteAtomic(SettingsFile.c(), JWrite(o))) Log(L"保存设置失败");
         delete o;
     }
@@ -382,40 +344,34 @@ namespace Store
     // backups\yyyy-MM-dd\ 里放一份当天第一次检查时的全部数据，保留最近 KeepBackups 天
     bool DailyBackup()
     {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
+        DateTime st;
+        LocalNow(&st);
         Str day;
-        day.Int(st.wYear).Ch(L'-').Pad2(st.wMonth).Ch(L'-').Pad2(st.wDay);
+        day.Int(st.year).Ch(L'-').Pad2(st.month).Ch(L'-').Pad2(st.day);
         Str target = PathJoin(BackupsDir, day.c());
         if (DirExists(target.c())) return false;
         Str tmp = target + L".partial";
         if (DirExists(tmp.c())) DeleteTree(tmp.c());
         EnsureDir(PathJoin(tmp, L"notes").c());
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(PathJoin(NotesDir, L"*.json").c(), &fd);
-        if (h != INVALID_HANDLE_VALUE)
-        {
-            do CopyFileW(PathJoin(NotesDir, fd.cFileName).c(), PathJoin(PathJoin(tmp, L"notes"), fd.cFileName).c(), FALSE);
-            while (FindNextFileW(h, &fd));
-            FindClose(h);
-        }
-        if (FileExists(TrashFile.c())) CopyFileW(TrashFile.c(), PathJoin(tmp, L"trash.json").c(), FALSE);
-        if (FileExists(SettingsFile.c())) CopyFileW(SettingsFile.c(), PathJoin(tmp, L"settings.json").c(), FALSE);
-        if (!MoveFileW(tmp.c(), target.c())) { Log(L"每日备份失败"); return false; }
+        Vec<DirEntry> files;
+        ListDir(NotesDir.c(), files);
+        for (int i = 0; i < files.n; i++)
+            if (!files[i].isDir && files[i].name.EndsWith(L".json"))
+                CopyFileTo(PathJoin(NotesDir, files[i].name.c()).c(), PathJoin(PathJoin(tmp, L"notes"), files[i].name.c()).c());
+        if (FileExists(TrashFile.c())) CopyFileTo(TrashFile.c(), PathJoin(tmp, L"trash.json").c());
+        if (FileExists(SettingsFile.c())) CopyFileTo(SettingsFile.c(), PathJoin(tmp, L"settings.json").c());
+        if (!MoveTo(tmp.c(), target.c())) { Log(L"每日备份失败"); return false; }
 
         Vec<Str> dirs;
-        h = FindFirstFileW(PathJoin(BackupsDir, L"*").c(), &fd);
-        if (h != INVALID_HANDLE_VALUE)
+        Vec<DirEntry> all;
+        ListDir(BackupsDir.c(), all);
+        for (int i = 0; i < all.n; i++)
         {
-            do
-            {
-                Str n(fd.cFileName);
-                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && n.n == 10 && n.p[4] == L'-' && n.p[7] == L'-') dirs.Push(n);
-            } while (FindNextFileW(h, &fd));
-            FindClose(h);
+            const Str& n = all[i].name;
+            if (all[i].isDir && n.n == 10 && n.p[4] == L'-' && n.p[7] == L'-') dirs.Push(n);
         }
         for (int i = 1; i < dirs.n; i++)
-            for (int k = i; k > 0 && CompareStringOrdinal(dirs.p[k - 1].c(), -1, dirs.p[k].c(), -1, FALSE) == CSTR_GREATER_THAN; k--)
+            for (int k = i; k > 0 && WCmp(dirs.p[k - 1].c(), dirs.p[k].c()) > 0; k--)
                 Swap(dirs.p[k - 1], dirs.p[k]);
         for (int i = 0; i < dirs.n - KeepBackups; i++) DeleteTree(PathJoin(BackupsDir, dirs.p[i].c()).c());
         return true;
