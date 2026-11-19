@@ -5,6 +5,8 @@
 #include <d2d1.h>
 #include <dwrite.h>
 
+namespace Ui { struct Menu; }
+
 #define APP_VERSION L"2.0.0"
 
 // 项目和 gopan 的链接（设置页「关于」里打开）；gopan 网页也是同步的默认服务器
@@ -77,6 +79,8 @@ public:
     void SetHidden(bool hidden);      // 便签管理里的显示 / 隐藏
     void ShowTemporarily();
     void Locate();                    // 便签管理里的「定位」：提到最前、描边闪一下
+    void ShowSettingsMenu(int sx, int sy, HWND owner); // 便签管理里的「设置」
+    void AddStyleItems(Ui::Menu& m);
     float Scale() const;
 
     // 自测、调界面用

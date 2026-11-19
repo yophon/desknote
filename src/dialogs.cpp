@@ -1701,7 +1701,7 @@ struct ManageWin
     NoteWin* expanded = nullptr; // 展开看条目的那张
     bool tracking = false;
     float scroll = 0, contentH = 0, listTop = 0;
-    enum { HNew = 1, HShowAll, HRow, HToggle, HLocate, HDelete };
+    enum { HNew = 1, HShowAll, HRow, HToggle, HLocate, HDelete, HSettings };
 
     void Invalidate() { InvalidateRect(hwnd, nullptr, FALSE); }
     float ClientW() { RECT rc; GetClientRect(hwnd, &rc); return rc.right / S(); }
@@ -1840,11 +1840,14 @@ struct ManageWin
             float cy = ly + rowH / 2;
             D2D1_RECT_F del = D2D1::RectF(R - 12 - 32, cy - 16, R - 12, cy + 16);
             D2D1_RECT_F loc = D2D1::RectF(del.left - 4 - 32, cy - 16, del.left - 4, cy + 16);
-            D2D1_RECT_F tog = D2D1::RectF(loc.left - 14 - 40, cy - 10, loc.left - 14, cy + 10);
+            D2D1_RECT_F set = D2D1::RectF(loc.left - 4 - 32, cy - 16, loc.left - 4, cy + 16);
+            D2D1_RECT_F tog = D2D1::RectF(set.left - 14 - 40, cy - 10, set.left - 14, cy + 10);
             D2D1_RECT_F togHit = D2D1::RectF(tog.left - 40, cy - 16, tog.right + 4, cy + 16);
             Hit hr = { HRow, card, w }, ht = { HToggle, togHit, w }, hd = { HDelete, del, w };
             hits.Push(hr);
             hits.Push(ht);
+            Hit hs = { HSettings, set, w };
+            hits.Push(hs);
             if (!hidden) { Hit hl = { HLocate, loc, w }; hits.Push(hl); }
             hits.Push(hd);
             if (rt && ly - scroll < H && card.bottom - scroll > listTop)
@@ -1872,6 +1875,7 @@ struct ManageWin
                 Ui::Text(rt, sub, D2D1::RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
                 Ui::Text(rt, Str(L"显示"), D2D1::RectF(tog.left - 40, cy - 10, tog.left - 8, cy + 10), 12, 400, T.text2, Ui::Right);
                 DrawToggle(rt, tog, !hidden, hover == HToggle && hoverNote == w);
+                DrawBtn(rt, set, Str(), 0xE713, 2, hover == HSettings && hoverNote == w, press == HSettings && pressNote == w, T.cardBg);
                 if (hidden) Ui::Icon(rt, 0xE81D, (loc.left + loc.right) / 2, cy, 14, T.disabled);
                 else DrawBtn(rt, loc, Str(), 0xE81D, 2, hover == HLocate && hoverNote == w, press == HLocate && pressNote == w, T.cardBg);
                 bool hdel = hover == HDelete && hoverNote == w;
@@ -1986,6 +1990,19 @@ struct ManageWin
         case HToggle: w->SetHidden(!w->d->hidden); break;
         case HLocate: w->Locate(); break;
         case HDelete: g_app->DeleteNote(w, true); break;
+        case HSettings:
+        {
+            // 菜单弹在按钮下面
+            for (int i = 0; i < hits.n; i++)
+                if (hits[i].id == HSettings && hits[i].w == w)
+                {
+                    POINT p = { (LONG)(hits[i].r.left * S()), (LONG)((hits[i].r.bottom - scroll + 2) * S()) };
+                    ClientToScreen(hwnd, &p);
+                    w->ShowSettingsMenu(p.x, p.y, hwnd);
+                    break;
+                }
+            break;
+        }
         }
     }
 
@@ -2063,6 +2080,18 @@ struct ManageWin
             int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n);
             if (p && id == p && n == pn) self->Activate(p, n);
             self->Invalidate();
+            return 0;
+        }
+        case WM_RBUTTONUP:
+        {
+            // 右键一行：这张便签的设置菜单
+            NoteWin* n;
+            if (self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n) && self->Alive(n))
+            {
+                POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+                ClientToScreen(h, &p);
+                n->ShowSettingsMenu(p.x, p.y, h);
+            }
             return 0;
         }
         case WM_LBUTTONDBLCLK:

@@ -454,8 +454,18 @@ static void Phase1(const Str& server, const Str& key)
         Check(L"便签管理窗口能打开", app->manageWnd != nullptr);
         if (app->manageWnd) DestroyWindow(app->manageWnd);
         Pump(50);
+        // 隐藏着改设置（便签管理里的「设置」）：只记下来，显示时按新设置建窗口
+        WinMode oldMode = hdn->d->mode;
+        hdn->SetMode(ModeTopmost);
+        hdn->Collapse();
+        Str ft2;
+        ReadFileText(Store::NotePath(hdn->d->id).c(), &ft2);
+        Check(L"隐藏着改窗口模式和折叠：记下来", !hdn->hwnd && hdn->d->mode == ModeTopmost && hdn->d->collapsed && ft2.Find(L"topmost") >= 0);
         hdn->SetHidden(false);
         Check(L"重新显示：窗口回来", hdn->hwnd != nullptr && !hdn->d->hidden);
+        Check(L"重新显示：按改过的设置（胶囊）", hdn->d->collapsed && hdn->d->mode == ModeTopmost);
+        hdn->Expand();
+        hdn->SetMode(oldMode);
         hdn->SetHidden(true);
         WriteAtomic(PathJoin(Store::Dir, L"hidden-id.txt").c(), hdn->d->id);
     }

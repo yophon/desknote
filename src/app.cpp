@@ -624,6 +624,14 @@ extern "C" void __stdcall Start()
     else if (open.Eq(L"capsule") && g_app->notes.n) g_app->notes[0]->Collapse();
     else if (open.Eq(L"preview") && g_app->notes.n) g_app->notes[0]->DebugPreview();
     else if (open.Eq(L"manage")) g_app->ShowManage();
+    else if (open.Eq(L"managemenu") && g_app->notes.n)
+    {
+        g_app->ShowManage();
+        RECT r;
+        GetWindowRect(g_app->manageWnd, &r);
+        Ui::MenuDebug = true;
+        g_app->notes[0]->ShowSettingsMenu(r.left + (r.right - r.left) / 2, r.top + (r.bottom - r.top) / 3, g_app->manageWnd);
+    }
     else if (open.Eq(L"reminder") && g_app->notes.n) g_app->notes[0]->DebugReminder(2);
     else if (open.Eq(L"hover") && g_app->notes.n) g_app->notes[0]->DebugHover(1, 2);
     else if (open.StartsWith(L"menu") && g_app->notes.n) g_app->notes[0]->DebugMenu((int)ParseInt(open.Sub(4), 0));

@@ -1555,6 +1555,7 @@ void NoteWin::SetMode(WinMode m)
 {
     if (m == d->mode) return;
     d->mode = m;
+    if (!hwnd) return; // 隐藏着：显示时按它建窗口
     // 任务栏按钮要在窗口重新显示时才会增减
     ShowWindow(hwnd, SW_HIDE);
     ApplyMode();
@@ -1705,6 +1706,7 @@ RECT NoteWin::WorkAreaPx() const
 void NoteWin::Collapse()
 {
     if (d->collapsed) return;
+    if (!hwnd) { d->collapsed = true; Save(); return; }
     CommitEdit(true);
     SaveLayout();
     RECT wa = WorkAreaPx(), r;
@@ -1733,6 +1735,7 @@ void NoteWin::EnterCollapsed()
 void NoteWin::Expand()
 {
     if (!d->collapsed) return;
+    if (!hwnd) { d->collapsed = false; Save(); return; }
     KillTimer(hwnd, TimerHide);
     KillTimer(hwnd, TimerSlide);
     sliding = false;
@@ -1968,7 +1971,7 @@ enum
 {
     CmdUndo = 1, CmdRedo, CmdUp, CmdDown, CmdDelete, CmdRemind, CmdUnremind, CmdAdd, CmdClearDone,
     CmdFold, CmdChecks, CmdModeDesktop, CmdModeTopmost, CmdModeNormal, CmdShadow, CmdOpacity, CmdFontSize,
-    CmdNewNote, CmdDeleteNote, CmdTrash, CmdSettings, CmdExit, CmdHide, CmdManage,
+    CmdNewNote, CmdDeleteNote, CmdTrash, CmdSettings, CmdExit, CmdHide, CmdManage, CmdRename, CmdShow, CmdLocate,
     CmdWeight = 100, CmdTextColor = 200, CmdTextColorCustom = 220, CmdBgColor = 300, CmdBgColorCustom = 320
 };
 static const u32 TextColors[] = { DefaultTextColor, 0xF5F5F5, 0x222222, 0xF2C94C, 0xF08A3C, 0xE55B5B, 0x6CC27A, 0x5BA8E5 };
@@ -1996,6 +1999,55 @@ void NoteWin::OnMenuLive(int id, float v)
     else return;
     menuChanged = true;
     Render();
+}
+
+// 外观、窗口模式、勾选框、折叠：便签右键菜单和便签管理里的「设置」共用
+void NoteWin::AddStyleItems(Ui::Menu& m)
+{
+    Ui::Menu* look = m.Sub(L"外观", 0xE790);
+    look->Header(L"背景");
+    look->Swatches(CmdBgColor, BgColors, 8, IndexOfColor(BgColors, d->bgColor), CmdBgColorCustom, d->bgColor);
+    look->Header(L"文字");
+    look->Swatches(CmdTextColor, TextColors, 8, IndexOfColor(TextColors, d->textColor), CmdTextColorCustom, d->textColor);
+    look->Sep();
+    look->Slider(CmdOpacity, L"不透明度", 0, 100, (float)(d->opacity * 100), 5, L"%");
+    look->Slider(CmdFontSize, L"字号", 10, 40, (float)d->fontSize, 1, L"");
+    int wsel = -1;
+    for (int i = 0; i < 4; i++) if (d->fontWeight == Weights[i]) wsel = i;
+    look->Segment(CmdWeight, L"粗细", WeightNames, 4, wsel);
+    look->Sep();
+    look->Check(CmdShadow, L"文字阴影", d->shadow, L"背景很透明时，文字更清楚").live = true;
+    Ui::Menu* modes = m.Sub(L"窗口模式", 0xE718);
+    modes->Radio(CmdModeDesktop, L"置底", L"贴在桌面上，显示桌面时也在", d->mode == ModeDesktop);
+    modes->Radio(CmdModeTopmost, L"置顶", L"总在其他窗口前面", d->mode == ModeTopmost);
+    modes->Radio(CmdModeNormal, L"普通窗口", L"和其他程序一样，出现在任务栏", d->mode == ModeNormal);
+    m.Check(CmdChecks, L"显示勾选框", d->checkboxes);
+    m.Item(CmdFold, d->collapsed ? L"展开" : L"折叠成胶囊", d->collapsed ? 0xE740 : 0xE73F);
+}
+
+// 便签管理里一张便签的「设置」：和右键菜单同一套，隐藏着的便签也能改（显示时按新设置）
+void NoteWin::ShowSettingsMenu(int sx, int sy, HWND owner)
+{
+    CommitEdit(true);
+    ClosePreview();
+    Ui::Menu m;
+    m.Header(d->title);
+    if (hwnd) m.Item(CmdRename, L"改标题", 0xE70F);
+    AddStyleItems(m);
+    m.Sep();
+    if (d->hidden) m.Item(CmdShow, L"显示这张便签", 0xE890);
+    else
+    {
+        m.Item(CmdLocate, L"定位", 0xE81D);
+        m.Item(CmdHide, L"隐藏这张便签", 0xED1A);
+    }
+    m.Item(CmdDeleteNote, L"删除这张便签…", 0xE74D);
+    BeginChange();
+    menuChanged = false;
+    int cmd = Ui::MenuRun(owner, &m, sx, sy, NoteMenuLive, this);
+    if (menuChanged) Save();
+    EndChange();
+    if (cmd) RunCommand(cmd, NotEditing); // 可能删掉了这张便签，之后不再碰 this
 }
 
 void NoteWin::OnContextMenu(int sx, int sy)
@@ -2040,25 +2092,7 @@ void NoteWin::OnContextMenu(int sx, int sy)
         m.Item(CmdRedo, L"重做", 0xE7A6, L"Ctrl+Y").disabled = !redo.n;
     }
     m.Sep();
-    Ui::Menu* look = m.Sub(L"外观", 0xE790);
-    look->Header(L"背景");
-    look->Swatches(CmdBgColor, BgColors, 8, IndexOfColor(BgColors, d->bgColor), CmdBgColorCustom, d->bgColor);
-    look->Header(L"文字");
-    look->Swatches(CmdTextColor, TextColors, 8, IndexOfColor(TextColors, d->textColor), CmdTextColorCustom, d->textColor);
-    look->Sep();
-    look->Slider(CmdOpacity, L"不透明度", 0, 100, (float)(d->opacity * 100), 5, L"%");
-    look->Slider(CmdFontSize, L"字号", 10, 40, (float)d->fontSize, 1, L"");
-    int wsel = -1;
-    for (int i = 0; i < 4; i++) if (d->fontWeight == Weights[i]) wsel = i;
-    look->Segment(CmdWeight, L"粗细", WeightNames, 4, wsel);
-    look->Sep();
-    look->Check(CmdShadow, L"文字阴影", d->shadow, L"背景很透明时，文字更清楚").live = true;
-    Ui::Menu* modes = m.Sub(L"窗口模式", 0xE718);
-    modes->Radio(CmdModeDesktop, L"置底", L"贴在桌面上，显示桌面时也在", d->mode == ModeDesktop);
-    modes->Radio(CmdModeTopmost, L"置顶", L"总在其他窗口前面", d->mode == ModeTopmost);
-    modes->Radio(CmdModeNormal, L"普通窗口", L"和其他程序一样，出现在任务栏", d->mode == ModeNormal);
-    m.Check(CmdChecks, L"显示勾选框", d->checkboxes);
-    m.Item(CmdFold, d->collapsed ? L"展开" : L"折叠成胶囊", d->collapsed ? 0xE740 : 0xE73F);
+    AddStyleItems(m);
     m.Sep();
     m.Item(CmdNewNote, L"新建便签", 0xE70B);
     m.Item(CmdHide, L"隐藏这张便签", 0xED1A);
@@ -2104,6 +2138,9 @@ void NoteWin::RunCommand(int cmd, int target)
     case CmdTrash: g_app->ShowTrash(); return;
     case CmdManage: g_app->ShowManage(); return;
     case CmdHide: SetHidden(true); return; // 之后 this 的窗口没了，直接返回
+    case CmdShow: SetHidden(false); return;
+    case CmdLocate: Locate(); return;
+    case CmdRename: Locate(); BeginEdit(TitleIndex); return;
     case CmdSettings: g_app->ShowSettings(); return;
     case CmdExit: g_app->Exit(); return;
     case CmdAdd: Expand(); BeginEdit(d->items.n); return;
