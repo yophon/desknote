@@ -567,7 +567,18 @@ namespace DeskNote
                 wpf.Startup += delegate
                 {
                     app.Silent = testPhase != null;
+                    // 默认用软件渲染：用显卡渲染时 WPF 会加载显卡驱动，单这一项就多占约 70MB 内存，
+                    // 而便签这么小的窗口用 CPU 画完全够用。settings.json 里 "hardwareRender": true 可以改回去。
+                    // 测试目录下可以用环境变量 DESKNOTE_RENDER=hw|sw 临时指定（对比内存用）
+                    bool hw = Store.LoadSettings().HardwareRender;
+                    string envRender = isDefault ? null : Environment.GetEnvironmentVariable("DESKNOTE_RENDER");
+                    if (envRender == "hw") hw = true; else if (envRender == "sw") hw = false;
+                    if (!hw) System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
                     app.Start();
+                    string memdiag = Environment.GetEnvironmentVariable("DESKNOTE_MEMDIAG");
+                    if (!isDefault && !string.IsNullOrEmpty(memdiag))
+                        wpf.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle,
+                            new Action(delegate { MemDiag.Run(app, memdiag); }));
                     if (open == "trash") app.ShowTrash();
                     else if (open == "settings") app.ShowSettings();
                     else if (open == "reminder" && app.Notes.Count > 0) app.Notes[0].TestEditReminder(0); // 调界面用

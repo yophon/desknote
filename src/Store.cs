@@ -335,6 +335,8 @@ namespace DeskNote
         // 同步到 gopan
         public bool SyncEnabled;
         public string SyncServer = "", SyncFolder = "/DeskNote", SyncKey = "";
+        // 用显卡渲染（默认关：软件渲染省约 70MB 内存）。只能在 settings.json 里改，重启生效
+        public bool HardwareRender;
     }
 
     // ---------------------------------------------------------------------
@@ -494,6 +496,7 @@ namespace DeskNote
                 s.SyncServer = Json.Str(d, "syncServer", "");
                 s.SyncFolder = Json.Str(d, "syncFolder", s.SyncFolder);
                 s.SyncKey = Unprotect(Json.Str(d, "syncKey", ""));
+                s.HardwareRender = Json.Bool(d, "hardwareRender", false);
             }
             catch (Exception ex) { Log("读取设置失败：" + ex.Message); }
             return s;
@@ -506,7 +509,7 @@ namespace DeskNote
                 WriteAtomic(SettingsFile, Json.Write(new JObj()
                     .Set("hotkeyEnabled", s.HotkeyEnabled).Set("hotkey", s.Hotkey).Set("autoStartInit", s.AutoStartInit)
                     .Set("syncEnabled", s.SyncEnabled).Set("syncServer", s.SyncServer).Set("syncFolder", s.SyncFolder)
-                    .Set("syncKey", Protect(s.SyncKey))));
+                    .Set("syncKey", Protect(s.SyncKey)).Set("hardwareRender", s.HardwareRender)));
             }
             catch (Exception ex) { Log("保存设置失败：" + ex.Message); }
         }
