@@ -273,7 +273,7 @@ static const float SwD = 20, SwGap = 8;
 struct MenuLevel
 {
     Menu* m = nullptr;
-    HWND hwnd = nullptr;
+    Window* win = nullptr;
     int parentItem = -1;
     float S = 1;
     int cx = 0, cy = 0;   // 内容区左上角，屏幕像素
@@ -283,23 +283,35 @@ struct MenuLevel
     int hot = -1, hotPart = -1;
 };
 
-struct MenuSession
+struct MenuSession : Wnd::PopupLoop
 {
-    HWND owner = nullptr;
-    HWND fg = nullptr;
+    void* owner = nullptr;
     Vec<MenuLevel*> levels;
     MenuLiveFn live = nullptr;
     void* ctx = nullptr;
     int result = 0;
-    bool done = false;
     int pressLevel = -1, pressItem = -1, pressPart = -1;
     int dragLevel = -1, dragItem = -1;
     int timerLevel = -1;
+    void OnMouse(int type, int sx, int sy) override;
+    void OnKey(int key) override;
+    bool Inside(int sx, int sy) override;
 };
 
 static MenuSession* g_ms;
-static HHOOK g_hook;
-static const wchar_t* MenuClass = L"DeskNoteMenu";
+static void OnSubTimer();
+
+// 菜单窗口只收子菜单的定时器（鼠标键盘都由弹出会话交过来）
+struct MenuWinHandler : WinHandler
+{
+    void Paint(Window*, Painter*, float, float) override {}
+    bool OnEvent(Window*, const Event& e) override
+    {
+        if (e.type == EvTimer && e.timer == 1 && g_ms) OnSubTimer();
+        return true;
+    }
+};
+static MenuWinHandler g_menuWin;
 bool MenuActive() { return g_ms != nullptr; }
 
 static bool Selectable(const MenuItem& it) { return it.kind != MkSep && it.kind != MkHeader && !it.disabled; }
@@ -404,9 +416,8 @@ static void RenderLevel(MenuLevel* lv)
     MenuSession* s = g_ms;
     float S = lv->S;
     int pw = (int)((lv->w + Margin * 2) * S + 0.5f), ph = (int)((lv->h + Margin * 2) * S + 0.5f);
-    Canvas c;
-    if (!c.Begin(pw, ph, 96 * S)) { c.End(lv->hwnd); return; }
-    Painter* rt = c.rt;
+    Painter* rt = Wnd::BeginPaint(lv->win, pw, ph);
+    if (!rt) { Wnd::EndPaint(lv->win); return; }
     Gfx::GrayscaleText(rt);
     RectF box = RectF(Margin, Margin, Margin + lv->w, Margin + lv->h);
     Shadow(rt, box, Radius, 12, T.dark ? 0.030f : 0.016f, 3);
@@ -538,15 +549,7 @@ static void RenderLevel(MenuLevel* lv)
         }
         }
     }
-    c.End(lv->hwnd);
-}
-
-static RECT WorkAreaAt(int x, int y)
-{
-    POINT p = { x, y };
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
-    return mi.rcWork;
+    Wnd::EndPaint(lv->win);
 }
 
 static void FirstSelectable(MenuLevel* lv)
@@ -561,13 +564,12 @@ static MenuLevel* OpenLevel(Menu* m, int parentItem, int ax, int ay, int flipX, 
     MenuLevel* lv = new MenuLevel();
     lv->m = m;
     lv->parentItem = parentItem;
-    lv->hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, MenuClass, L"DeskNote 菜单", WS_POPUP,
-                               ax, ay, 1, 1, s->owner, nullptr, g_inst, nullptr);
-    lv->S = GetDpiForWindow(lv->hwnd) / 96.f;
+    lv->win = Wnd::NewPopup(&g_menuWin, s->owner, ax, ay);
+    lv->S = Wnd::Scale(lv->win);
     LayoutLevel(lv);
     float S = lv->S;
     int w = (int)(lv->w * S + 0.5f), h = (int)(lv->h * S + 0.5f);
-    RECT wa = WorkAreaAt(ax, ay);
+    RectI wa = Wnd::WorkAreaAt(ax, ay);
     int x = ax, y = ay;
     if (x + w > wa.right) x = flipX - w;
     if (y + h > wa.bottom) y = parentItem < 0 ? ay - h : wa.bottom - h;
@@ -576,11 +578,11 @@ static MenuLevel* OpenLevel(Menu* m, int parentItem, int ax, int ay, int flipX, 
     lv->cx = x;
     lv->cy = y;
     int m0 = (int)(Margin * S + 0.5f);
-    SetWindowPos(lv->hwnd, HWND_TOPMOST, x - m0, y - m0, w + 2 * m0, h + 2 * m0, SWP_NOACTIVATE);
+    Wnd::SetBounds(lv->win, x - m0, y - m0, w + 2 * m0, h + 2 * m0);
     if (keyboard) FirstSelectable(lv);
     s->levels.Push(lv);
     RenderLevel(lv);
-    ShowWindow(lv->hwnd, SW_SHOWNOACTIVATE);
+    Wnd::ShowNoActivate(lv->win);
     return lv;
 }
 
@@ -590,12 +592,12 @@ static void CloseFrom(int level)
     while (s->levels.n > level)
     {
         MenuLevel* lv = s->levels.Last();
-        DestroyWindow(lv->hwnd);
+        Wnd::Destroy(lv->win);
         delete lv;
         s->levels.RemoveAt(s->levels.n - 1);
     }
     if (s->pressLevel >= level) s->pressLevel = s->pressItem = -1;
-    if (s->dragLevel >= level) s->dragLevel = s->dragItem = -1;
+    if (s->dragLevel >= level) { s->dragLevel = s->dragItem = -1; s->dragging = false; }
     if (s->levels.n) RenderLevel(s->levels.Last());
 }
 
@@ -619,13 +621,13 @@ static void OpenSub(int level, int item, bool keyboard)
 }
 
 // 屏幕坐标 -> 第几级菜单的第几项、项内哪个部件
-static bool HitTest(POINT p, int* level, int* item, int* part)
+static bool HitTest(int px, int py, int* level, int* item, int* part)
 {
     MenuSession* s = g_ms;
     for (int L = s->levels.n - 1; L >= 0; L--)
     {
         MenuLevel* lv = s->levels[L];
-        float x = (p.x - lv->cx) / lv->S + Margin, y = (p.y - lv->cy) / lv->S + Margin;
+        float x = (px - lv->cx) / lv->S + Margin, y = (py - lv->cy) / lv->S + Margin;
         if (x < Margin || y < Margin || x >= Margin + lv->w || y >= Margin + lv->h) continue;
         *level = L;
         *item = -1;
@@ -675,13 +677,13 @@ static void SetHot(int level, int item, int part)
     }
     // 子菜单的开合稍等一下再做，斜着移向子菜单时不会被误关
     s->timerLevel = level;
-    SetTimer(s->levels[0]->hwnd, 1, 220, nullptr);
+    Wnd::SetTimer(s->levels[0]->win, 1, 220);
 }
 
 static void OnSubTimer()
 {
     MenuSession* s = g_ms;
-    KillTimer(s->levels[0]->hwnd, 1);
+    Wnd::KillTimer(s->levels[0]->win, 1);
     int L = s->timerLevel;
     if (L < 0 || L >= s->levels.n) return;
     MenuLevel* lv = s->levels[L];
@@ -744,17 +746,21 @@ static void Activate(int level, int item, int part, bool keyboard)
     }
 }
 
-static void OnMouse(const MSG& msg)
+bool MenuSession::Inside(int sx, int sy)
 {
-    MenuSession* s = g_ms;
-    POINT p = { GET_X_LPARAM(msg.lParam), GET_Y_LPARAM(msg.lParam) };
-    if (msg.message == WM_MOUSEWHEEL || msg.message == WM_MOUSEHWHEEL) return;
-    ClientToScreen(msg.hwnd, &p);
+    int L, item, part;
+    return HitTest(sx, sy, &L, &item, &part);
+}
+
+void MenuSession::OnMouse(int type, int sx, int sy)
+{
+    MenuSession* s = this;
+    struct { int x, y; } p = { sx, sy };
     int L = -1, item = -1, part = -1;
-    bool inside = HitTest(p, &L, &item, &part);
-    switch (msg.message)
+    bool inside = HitTest(p.x, p.y, &L, &item, &part);
+    switch (type)
     {
-    case WM_MOUSEMOVE:
+    case EvMouseMove:
         if (s->dragLevel >= 0)
         {
             MenuLevel* lv = s->levels[s->dragLevel];
@@ -768,13 +774,14 @@ static void OnMouse(const MSG& msg)
             if (last->hot >= 0) { last->hot = -1; last->hotPart = -1; RenderLevel(last); }
         }
         return;
-    case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_LBUTTONDBLCLK: case WM_RBUTTONDBLCLK:
+    case EvMouseDown:
         if (!inside) { s->done = true; return; }
         if (item < 0) return;
         if (s->levels[L]->m->items[item].kind == MkSlider)
         {
             s->dragLevel = L;
             s->dragItem = item;
+            s->dragging = true;
             MenuLevel* lv = s->levels[L];
             SetSlider(L, item, (p.x - lv->cx) / lv->S + Margin);
             RenderLevel(lv);
@@ -785,12 +792,13 @@ static void OnMouse(const MSG& msg)
         s->pressPart = part;
         RenderLevel(s->levels[L]);
         return;
-    case WM_LBUTTONUP: case WM_RBUTTONUP:
+    case EvMouseUp:
     {
         if (s->dragLevel >= 0)
         {
             int dl = s->dragLevel;
             s->dragLevel = s->dragItem = -1;
+            s->dragging = false;
             if (dl < s->levels.n) RenderLevel(s->levels[dl]);
             return;
         }
@@ -818,25 +826,25 @@ static void MoveHot(MenuLevel* lv, int dir)
     RenderLevel(lv);
 }
 
-static void OnKey(WPARAM vk)
+void MenuSession::OnKey(int vk)
 {
-    MenuSession* s = g_ms;
+    MenuSession* s = this;
     int L = s->levels.n - 1;
     MenuLevel* lv = s->levels[L];
     MenuItem* it = lv->hot >= 0 ? &lv->m->items[lv->hot] : nullptr;
     switch (vk)
     {
-    case VK_ESCAPE:
+    case KeyEscape:
         if (L > 0) CloseFrom(L); else s->done = true;
         return;
-    case VK_MENU: case VK_F10: case VK_APPS:
+    case KeyAlt: case KeyF1 + 9: case KeyApps:
         s->done = true;
         return;
-    case VK_UP: MoveHot(lv, -1); return;
-    case VK_DOWN: MoveHot(lv, 1); return;
-    case VK_LEFT: case VK_RIGHT:
+    case KeyUp: MoveHot(lv, -1); return;
+    case KeyDown: MoveHot(lv, 1); return;
+    case KeyLeft: case KeyRight:
     {
-        int d = vk == VK_RIGHT ? 1 : -1;
+        int d = vk == KeyRight ? 1 : -1;
         if (it && it->kind == MkSlider)
         {
             it->val = Clamp(it->val + d * it->step, it->minV, it->maxV);
@@ -854,99 +862,32 @@ static void OnKey(WPARAM vk)
         if (d < 0 && L > 0) CloseFrom(L);
         return;
     }
-    case VK_RETURN: case VK_SPACE:
+    case KeyEnter: case KeySpace:
         if (it) Activate(L, lv->hot, it->kind == MkSwatches || it->kind == MkSegment ? it->sel : -1, true);
         return;
     }
 }
 
-static LRESULT CALLBACK MenuProc(HWND h, UINT m, WPARAM w, LPARAM l)
-{
-    switch (m)
-    {
-    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-    case WM_TIMER:
-        if (g_ms && w == 1) OnSubTimer();
-        else if (g_ms && w == 2 && !MenuDebug)
-        {
-            // 别的程序抢到前台（按了 Win 键、Alt+Tab 等）：收起菜单
-            HWND f = GetForegroundWindow();
-            DWORD pid = 0;
-            GetWindowThreadProcessId(f, &pid);
-            if (f != g_ms->fg && pid != GetCurrentProcessId()) g_ms->done = true;
-        }
-        return 0;
-    }
-    return DefWindowProcW(h, m, w, l);
-}
-
-// 点到菜单外面（包括别的程序的窗口）：收起菜单，这一下点击不往下传
-static LRESULT CALLBACK MouseHook(int code, WPARAM w, LPARAM l)
-{
-    if (code == HC_ACTION && g_ms && !g_ms->done &&
-        (w == WM_LBUTTONDOWN || w == WM_RBUTTONDOWN || w == WM_MBUTTONDOWN || w == WM_XBUTTONDOWN))
-    {
-        MSLLHOOKSTRUCT* hs = (MSLLHOOKSTRUCT*)l;
-        int L, item, part;
-        if (!HitTest(hs->pt, &L, &item, &part))
-        {
-            g_ms->done = true;
-            if (g_ms->levels.n) PostMessageW(g_ms->levels[0]->hwnd, WM_NULL, 0, 0);
-            return 1;
-        }
-    }
-    return CallNextHookEx(g_hook, code, w, l);
-}
-
-int MenuRun(HWND owner, Menu* m, int sx, int sy, MenuLiveFn live, void* ctx)
+int MenuRun(void* owner, Menu* m, int sx, int sy, MenuLiveFn live, void* ctx)
 {
     if (g_ms || !m || !m->items.n) return 0;
-    static bool registered = false;
-    if (!registered)
-    {
-        WNDCLASSW wc = {};
-        wc.lpfnWndProc = MenuProc;
-        wc.hInstance = g_inst;
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.lpszClassName = MenuClass;
-        RegisterClassW(&wc);
-        registered = true;
-    }
     LoadTheme();
     MenuSession s;
     s.owner = owner;
     s.live = live;
     s.ctx = ctx;
+    s.keepOnForegroundChange = MenuDebug;
     g_ms = &s;
-    if (owner) SetForegroundWindow(owner);
-    s.fg = GetForegroundWindow();
     OpenLevel(m, -1, sx, sy, sx, false);
-    HWND root = s.levels[0]->hwnd;
+    Window* root = s.levels[0]->win;
     if (MenuDebugOpenSub > 0)
     {
         for (int i = 0, k = 0; i < m->items.n; i++)
             if (m->items[i].sub && ++k == MenuDebugOpenSub) { s.levels[0]->hot = i; OpenSub(0, i, false); break; }
         MenuDebugOpenSub = 0;
     }
-    SetCapture(root);
-    g_hook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, g_inst, 0);
-    SetTimer(root, 2, 150, nullptr);
-    MSG msg;
-    while (!s.done)
-    {
-        BOOL r = GetMessageW(&msg, nullptr, 0, 0);
-        if (r <= 0) { PostQuitMessage((int)msg.wParam); break; }
-        if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) { OnMouse(msg); continue; }
-        if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) { OnKey(msg.wParam); continue; }
-        if (msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP || msg.message == WM_CHAR || msg.message == WM_SYSCHAR) continue;
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-        if (!s.done && GetCapture() != root && s.dragLevel < 0) SetCapture(root);
-    }
-    if (g_hook) { UnhookWindowsHookEx(g_hook); g_hook = nullptr; }
-    KillTimer(root, 1);
-    KillTimer(root, 2);
-    ReleaseCapture();
+    Wnd::RunPopupLoop(root, owner, &s);
+    Wnd::KillTimer(root, 1);
     CloseFrom(0);
     g_ms = nullptr;
     return s.result;

@@ -88,7 +88,7 @@ namespace Ui
     };
     typedef void (*MenuLiveFn)(void* ctx, int id, float value);
     // 在屏幕坐标 (sx, sy) 弹出，返回选中的命令（0 = 取消）；拖滑块、点色块时实时回调 live
-    int MenuRun(HWND owner, Menu* m, int sx, int sy, MenuLiveFn live, void* ctx);
+    int MenuRun(void* owner, Menu* m, int sx, int sy, MenuLiveFn live, void* ctx); // owner：平台的窗口句柄
     bool MenuActive();
     extern int MenuDebugOpenSub; // 调界面用：弹出后自动展开第几个子菜单（从 1 数）
     extern bool MenuDebug;

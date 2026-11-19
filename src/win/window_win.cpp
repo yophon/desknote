@@ -27,9 +27,11 @@ struct Window
     float minW = 0, minH = 0;
     HWND owner = nullptr;
     Vec<TextField*> fields;
+    Canvas* canvas = nullptr;  // 弹出窗口：BeginPaint 到 EndPaint 之间
 };
 
 static const wchar_t* DialogClass = L"DeskNoteDialog";
+static const wchar_t* PopupClass = L"DeskNotePopup";
 static Vec<Window*> g_dialogs; // 消息循环里要做对话框导航的窗口
 
 static float ScaleOf(Window* w) { return w->dpi / 96.f; }
@@ -275,6 +277,180 @@ static LRESULT CALLBACK DialogProc(HWND hw, UINT m, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hw, m, wp, lp);
 }
 
+// =====================================================================
+// 弹出窗口和弹出会话
+// =====================================================================
+static Wnd::PopupLoop* g_loop;
+static HHOOK g_hook;
+static HWND g_loopFg, g_loopRoot;
+enum { TimerForeground = 0x7F01 };
+
+static LRESULT CALLBACK PopupProc(HWND hw, UINT m, WPARAM wp, LPARAM lp)
+{
+    Window* w = (Window*)GetWindowLongPtrW(hw, GWLP_USERDATA);
+    if (m == WM_NCCREATE)
+    {
+        w = (Window*)((CREATESTRUCTW*)lp)->lpCreateParams;
+        w->hwnd = hw;
+        SetWindowLongPtrW(hw, GWLP_USERDATA, (LONG_PTR)w);
+    }
+    if (!w) return DefWindowProcW(hw, m, wp, lp);
+    if (m == WM_NCDESTROY)
+    {
+        SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
+        delete w->canvas;
+        delete w;
+        return DefWindowProcW(hw, m, wp, lp);
+    }
+    Event e;
+    switch (m)
+    {
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_TIMER:
+        if (wp == TimerForeground)
+        {
+            // 别的程序抢到前台（按了 Win 键、Alt+Tab 等）：收起
+            if (g_loop && !g_loop->keepOnForegroundChange)
+            {
+                HWND f = GetForegroundWindow();
+                DWORD pid = 0;
+                GetWindowThreadProcessId(f, &pid);
+                if (f != g_loopFg && pid != GetCurrentProcessId()) g_loop->done = true;
+            }
+            return 0;
+        }
+        e.type = EvTimer;
+        e.timer = (int)wp;
+        Send(w, e);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (!w->tracking)
+        {
+            TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, hw, 0 };
+            TrackMouseEvent(&t);
+            w->tracking = true;
+        }
+        MouseEvent(w, EvMouseMove, 0, 0, lp);
+        return 0;
+    case WM_MOUSELEAVE:
+        w->tracking = false;
+        e.type = EvMouseLeave;
+        Send(w, e);
+        return 0;
+    case WM_LBUTTONDOWN: MouseEvent(w, EvMouseDown, MouseLeft, 1, lp); return 0;
+    case WM_LBUTTONUP: MouseEvent(w, EvMouseUp, MouseLeft, 0, lp); return 0;
+    case WM_DESTROY:
+        e.type = EvDestroy;
+        Send(w, e);
+        w->h = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hw, m, wp, lp);
+}
+
+// 点到弹出的窗口外面（包括别的程序的窗口）：结束会话，这一下点击不往下传
+static LRESULT CALLBACK LoopMouseHook(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && g_loop && !g_loop->done &&
+        (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN || wp == WM_XBUTTONDOWN))
+    {
+        MSLLHOOKSTRUCT* hs = (MSLLHOOKSTRUCT*)lp;
+        if (!g_loop->Inside(hs->pt.x, hs->pt.y))
+        {
+            g_loop->done = true;
+            if (g_loopRoot) PostMessageW(g_loopRoot, WM_NULL, 0, 0);
+            return 1;
+        }
+    }
+    return CallNextHookEx(g_hook, code, wp, lp);
+}
+
+namespace Wnd
+{
+    Window* NewPopup(WinHandler* h, void* owner, int x, int y)
+    {
+        Window* w = new Window();
+        w->h = h;
+        w->owner = (HWND)owner;
+        HWND hw = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, PopupClass, L"DeskNote 菜单", WS_POPUP,
+                                  x, y, 1, 1, (HWND)owner, nullptr, g_inst, w);
+        if (!hw) { delete w; return nullptr; }
+        w->dpi = GetDpiForWindow(hw);
+        return w;
+    }
+    void SetBounds(Window* w, int x, int y, int width, int height)
+    {
+        SetWindowPos(w->hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    }
+    void ShowNoActivate(Window* w) { ShowWindow(w->hwnd, SW_SHOWNOACTIVATE); }
+    Painter* BeginPaint(Window* w, int pw, int ph)
+    {
+        delete w->canvas;
+        w->canvas = new Canvas();
+        return w->canvas->Begin(pw, ph, 96.f * ScaleOf(w)) ? w->canvas->rt : nullptr;
+    }
+    void EndPaint(Window* w)
+    {
+        if (!w->canvas) return;
+        w->canvas->End(w->hwnd);
+        delete w->canvas;
+        w->canvas = nullptr;
+    }
+    RectI WorkAreaAt(int x, int y)
+    {
+        POINT p = { x, y };
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
+        RectI r = { mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom };
+        return r;
+    }
+
+    void RunPopupLoop(Window* root, void* owner, PopupLoop* loop)
+    {
+        HWND rh = root->hwnd;
+        if (owner) SetForegroundWindow((HWND)owner);
+        g_loop = loop;
+        g_loopRoot = rh;
+        g_loopFg = GetForegroundWindow();
+        SetCapture(rh);
+        g_hook = SetWindowsHookExW(WH_MOUSE_LL, LoopMouseHook, g_inst, 0);
+        ::SetTimer(rh, TimerForeground, 150, nullptr);
+        MSG msg;
+        while (!loop->done)
+        {
+            BOOL r = GetMessageW(&msg, nullptr, 0, 0);
+            if (r <= 0) { PostQuitMessage((int)msg.wParam); break; }
+            if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST)
+            {
+                int type = -1;
+                switch (msg.message)
+                {
+                case WM_MOUSEMOVE: type = EvMouseMove; break;
+                case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_LBUTTONDBLCLK: case WM_RBUTTONDBLCLK: type = EvMouseDown; break;
+                case WM_LBUTTONUP: case WM_RBUTTONUP: type = EvMouseUp; break;
+                }
+                if (type >= 0)
+                {
+                    POINT p = { GET_X_LPARAM(msg.lParam), GET_Y_LPARAM(msg.lParam) };
+                    ClientToScreen(msg.hwnd, &p);
+                    loop->OnMouse(type, p.x, p.y);
+                }
+                continue;
+            }
+            if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) { loop->OnKey((int)msg.wParam); continue; }
+            if (msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP || msg.message == WM_CHAR || msg.message == WM_SYSCHAR) continue;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if (!loop->done && GetCapture() != rh && !loop->dragging) SetCapture(rh);
+        }
+        if (g_hook) { UnhookWindowsHookEx(g_hook); g_hook = nullptr; }
+        if (IsWindow(rh)) ::KillTimer(rh, TimerForeground);
+        ReleaseCapture();
+        g_loop = nullptr;
+        g_loopRoot = nullptr;
+    }
+}
+
 namespace Wnd
 {
     void RegisterClasses()
@@ -285,6 +461,10 @@ namespace Wnd
         wc.style = CS_DBLCLKS;
         wc.lpfnWndProc = DialogProc;
         wc.lpszClassName = DialogClass;
+        RegisterClassW(&wc);
+        wc.style = 0;
+        wc.lpfnWndProc = PopupProc;
+        wc.lpszClassName = PopupClass;
         RegisterClassW(&wc);
     }
 

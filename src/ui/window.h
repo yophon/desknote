@@ -108,6 +108,28 @@ namespace Wnd
     void* Native(Window* w);                  // 平台的窗口句柄（只给平台代码用）
     WinHandler* Handler(Window* w);
 
+    // ---- 弹出窗口：无边框、整窗透明（自己画全部像素）、不抢焦点、总在最前（菜单、悬停预览）----
+    Window* NewPopup(WinHandler* h, void* owner, int x, int y); // 建在屏幕 (x, y) 处（决定用哪块屏的缩放）；先不显示
+    void SetBounds(Window* w, int x, int y, int width, int height); // 屏幕像素
+    void ShowNoActivate(Window* w);
+    // 马上画：画布 pw × ph 物理像素，EndPaint 时贴到窗口上（窗口大小跟着变）；BeginPaint 失败返回空，EndPaint 照样要调
+    Painter* BeginPaint(Window* w, int pw, int ph);
+    void EndPaint(Window* w);
+    RectI WorkAreaAt(int x, int y);           // 屏幕上 (x, y) 所在那块屏的工作区（去掉任务栏），屏幕像素
+
+    // ---- 弹出会话（菜单）：期间所有鼠标、键盘都交给它；点到外面、别的程序到了前台就结束 ----
+    struct PopupLoop
+    {
+        bool done = false;
+        bool keepOnForegroundChange = false; // 调界面用
+        bool dragging = false;               // 拖滑块时别把鼠标捕获抢回去
+        virtual void OnMouse(int type, int sx, int sy) = 0; // EvMouseMove / EvMouseDown / EvMouseUp，屏幕像素
+        virtual void OnKey(int key) = 0;
+        virtual bool Inside(int sx, int sy) = 0;           // 这一点在不在弹出的窗口上
+    };
+    // 先把 owner 带到前台（菜单的命令要回到它身上），然后一直跑到 loop->done
+    void RunPopupLoop(Window* root, void* owner, PopupLoop* loop);
+
     // ---- 原生输入框 ----
     enum { FieldCenter = 1, FieldPassword = 2, FieldNoIme = 4 };
     TextField* CreateField(Window* w, const Str& text, int flags);
