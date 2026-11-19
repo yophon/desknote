@@ -601,7 +601,7 @@ struct SettingsWin : WinHandler
         Section(rt, y, L"同步", false);
         const float textL = L + 16 + 20 + 16;
         Str help(L"密钥在 gopan 网页的「Agent 接入」里新建，权限勾选：浏览与搜索、读取与下载内容、新建重命名移动与复制、移入回收站与恢复。"
-                 L"只同步内容和外观，窗口位置、回收站各台电脑自己管；两台电脑同时改了同一张便签时，本地那份另存成「冲突副本」，不会丢。");
+                 L"只同步内容和外观，窗口位置、回收站各台电脑自己管；两台电脑同时改了同一张便签时，按条目自动合并，两边改的都留下。");
         float helpH = Ui::MeasureWrap(help, R - 16 - textL, 12, 400);
         float below = 8 + 3 * 44 + 6 + helpH + 14 + 32 + 18;
         Str status = SyncStatus(g_app->sync);
