@@ -158,7 +158,8 @@ static JVal* Args() { return JNewObj(); }
 // ---------------------------------------------------------------------
 // 同步状态：每张便签上次同步时“本地内容的哈希”和“远端文件的 sha256”（和 WPF 版的 sync.json 相同）
 // ---------------------------------------------------------------------
-struct KnownNote { Str id, local, remote; };
+// base：上次同步时的内容（规范化后），两边都改了时拿它做底稿三方合并
+struct KnownNote { Str id, local, remote, base; };
 struct SyncState
 {
     Str server, folder;
@@ -185,6 +186,7 @@ struct SyncState
                 k.id = ns->keys[i];
                 k.local = o->Str_(L"local", L"");
                 k.remote = o->Str_(L"remote", L"");
+                k.base = o->Str_(L"base", L"");
                 notes.Push(k);
             }
         delete d;
@@ -196,6 +198,7 @@ struct SyncState
         {
             JVal* o = JNewObj();
             o->SetStr(L"local", notes[i].local)->SetStr(L"remote", notes[i].remote);
+            if (notes[i].base.n) o->SetStr(L"base", notes[i].base);
             ns->Set(notes[i].id.c(), o);
         }
         JVal* o = JNewObj();
@@ -212,7 +215,7 @@ struct SyncState
 // 一轮同步：后台算出计划，回到界面线程执行
 // ---------------------------------------------------------------------
 struct LocalNote { Str id, content; };
-struct Pull { Str id, content; };
+struct Pull { Str id, content, base0; }; // base0：拉之前的底稿，本地在同步途中又改了时用它下一轮重新合并
 struct Plan
 {
     // 输入
@@ -226,14 +229,15 @@ struct Plan
     Vec<Pull> pulls, copies;        // copies：冲突时本地那份另存为新便签
     Vec<Str> localDeletes;          // 远端删了：本地移进回收站
     Vec<KnownNote> newState;
-    int pushed = 0, pulled = 0, deletedN = 0, conflicts = 0;
+    int pushed = 0, pulled = 0, deletedN = 0, conflicts = 0, merged = 0;
 
     const Str* Local(const Str& id) const { for (int i = 0; i < snapshot.n; i++) if (snapshot[i].id == id) return &snapshot[i].content; return nullptr; }
     const KnownNote* Known(const Str& id) const { for (int i = 0; i < known.n; i++) if (known[i].id == id) return &known[i]; return nullptr; }
-    void SetState(const Str& id, const Str& local, const Str& remote)
+    void SetState(const Str& id, const Str& local, const Str& remote, const Str& base)
     {
-        for (int i = 0; i < newState.n; i++) if (newState[i].id == id) { newState[i].local = local; newState[i].remote = remote; return; }
-        KnownNote k; k.id = id; k.local = local; k.remote = remote; newState.Push(k);
+        for (int i = 0; i < newState.n; i++)
+            if (newState[i].id == id) { newState[i].local = local; newState[i].remote = remote; newState[i].base = base; return; }
+        KnownNote k; k.id = id; k.local = local; k.remote = remote; k.base = base; newState.Push(k);
     }
     void DropState(const Str& id) { for (int i = 0; i < newState.n; i++) if (newState[i].id == id) { newState.RemoveAt(i); return; } }
 };
@@ -242,6 +246,133 @@ struct RemoteFile { Str id, nodeId, sha; };
 
 static Str FilePathOf(const Str& folder, const Str& id) { return (folder.Eq(L"/") ? Str() : folder) + L"/" + id + L".json"; }
 static Str Norm(const Str& s) { return s.Replace(L"\r\n", L"\n").Trim(); }
+
+// ---------------------------------------------------------------------
+// 合并：两边都改了时按条目三方合并（底稿 = 上次同步时的内容），不再整张另存冲突副本
+// ---------------------------------------------------------------------
+// 规范化：解析成便签再按 DeskNote 的格式写出。网页、App 写回的 json 排版不一样，内容相同不算改动
+static Str Canon(const Str& text, const Str& id)
+{
+    NoteData* n = NoteData::FromContentJson(text, id);
+    if (!n) return Norm(text);
+    Str s = n->ContentJson();
+    delete n;
+    return s;
+}
+
+static Str JText(const JVal* v) { return v ? JWrite(v) : Str(); }
+static bool JSame(const JVal* a, const JVal* b) { return JText(a) == JText(b); }
+static JVal* JClone(const JVal* v)
+{
+    JVal* c = new JVal(v->t);
+    c->b = v->b;
+    c->num = v->num;
+    c->s = v->s;
+    c->keys = v->keys;
+    for (int i = 0; i < v->arr.n; i++) c->arr.Push(JClone(v->arr[i]));
+    return c;
+}
+
+// 条目按文字认（条目没有 id）；重复的文字认第一条
+static Str ItemKey(const JVal* it) { return it && it->t == JObj ? it->Str_(L"text", L"") : JText(it); }
+static int FindItem(const Vec<JVal*>& list, const Str& key)
+{
+    for (int i = 0; i < list.n; i++) if (ItemKey(list[i]) == key) return i;
+    return -1;
+}
+
+static JVal* MergeObj(const JVal* b, const JVal* l, const JVal* r);
+static JVal* MergeItems(const JVal* b, const JVal* l, const JVal* r);
+
+// 一个值：一边没动取另一边（另一边删了就删）；两边都动了，对象逐个字段合并，items 按条目合并，其余取本地
+static JVal* MergeVal(const JVal* b, const JVal* l, const JVal* r, bool items)
+{
+    if (JSame(l, r)) return l ? JClone(l) : nullptr;
+    if (JSame(l, b)) return r ? JClone(r) : nullptr;
+    if (JSame(r, b)) return l ? JClone(l) : nullptr;
+    if (b && l && r && b->t == JObj && l->t == JObj && r->t == JObj) return MergeObj(b, l, r);
+    if (items && l && r && l->t == JArr && r->t == JArr) return MergeItems(b && b->t == JArr ? b : nullptr, l, r);
+    return l ? JClone(l) : JClone(r);
+}
+
+static JVal* MergeObj(const JVal* b, const JVal* l, const JVal* r)
+{
+    JVal* out = JNewObj();
+    Vec<Str> keys = l->keys; // 本地的字段顺序在前，远端新加的接在后面
+    for (int i = 0; i < r->keys.n; i++) if (!keys.Contains(r->keys[i])) keys.Push(r->keys[i]);
+    for (int i = 0; i < keys.n; i++)
+    {
+        JVal* v = MergeVal(b->Get(keys[i].c()), l->Get(keys[i].c()), r->Get(keys[i].c()), keys[i].Eq(L"items"));
+        if (v) out->Set(keys[i].c(), v);
+    }
+    return out;
+}
+
+// 条目列表：从本地的出发，把远端相对底稿的改动做上去
+static JVal* MergeItems(const JVal* b, const JVal* l, const JVal* r)
+{
+    Vec<JVal*> out;
+    for (int i = 0; i < l->Count(); i++) out.Push(JClone(l->At(i)));
+    Vec<JVal*> none;
+    const Vec<JVal*>& B = b ? b->arr : none;
+    // 远端删掉的（改文字也算删旧的、加新的）：本地没动过这一条就跟着删
+    for (int i = 0; i < B.n; i++)
+    {
+        Str k = ItemKey(B[i]);
+        if (FindItem(r->arr, k) >= 0) continue;
+        int li = FindItem(out, k);
+        if (li >= 0 && JSame(out[li], B[i])) { delete out[li]; out.RemoveAt(li); }
+    }
+    // 远端改了别的字段（勾选、提醒）：逐字段合并
+    for (int i = 0; i < r->Count(); i++)
+    {
+        const JVal* ri = r->At(i);
+        Str k = ItemKey(ri);
+        int bi = FindItem(B, k), li = FindItem(out, k);
+        if (bi < 0 || li < 0 || JSame(ri, B[bi])) continue;
+        JVal* m = MergeVal(B[bi], out[li], ri, false);
+        delete out[li];
+        out[li] = m ? m : JClone(ri);
+    }
+    // 远端新加的：插在它在远端的前一条后面
+    for (int i = 0; i < r->Count(); i++)
+    {
+        const JVal* ri = r->At(i);
+        Str k = ItemKey(ri);
+        if (FindItem(B, k) >= 0 || FindItem(out, k) >= 0) continue;
+        int at = 0;
+        for (int j = i - 1; j >= 0; j--)
+        {
+            int p = FindItem(out, ItemKey(r->At(j)));
+            if (p >= 0) { at = p + 1; break; }
+        }
+        out.Insert(at, JClone(ri));
+    }
+    JVal* arr = JNewArr();
+    for (int i = 0; i < out.n; i++) arr->Add(out[i]);
+    return arr;
+}
+
+// 三方合并一张便签；合并不了（解析失败）返回空串
+static Str MergeNote(const Str& base, const Str& local, const Str& remote, const Str& id)
+{
+    JVal* b = JParse(base);
+    JVal* l = JParse(local);
+    JVal* r = JParse(remote);
+    Str out;
+    if (b && l && r && b->t == JObj && l->t == JObj && r->t == JObj)
+    {
+        JVal* m = MergeObj(b, l, r);
+        Str text = JWrite(m);
+        delete m;
+        NoteData* n = NoteData::FromContentJson(text, id);
+        if (n) { out = n->ContentJson(); delete n; }
+    }
+    delete b;
+    delete l;
+    delete r;
+    return out;
+}
 
 // 写入；返回新 sha，远端在这期间被改了（EDIT_CONFLICT/READ_FIRST）返回空串，其他错误 *fail = true
 static Str WriteRemote(Mcp& c, const Str& path, const Str& content, const Str& baseSha, bool* fail)
@@ -345,13 +476,14 @@ static void Compute(Plan* p)
         const RemoteFile* R = nullptr;
         for (int i = 0; i < remote.n; i++) if (remote[i].id == id) R = &remote[i];
         const KnownNote* S = p->Known(id);
-        Str Lh = L ? Sha256Hex(*L) : Str();
+        Str Lc = L ? Canon(*L, id) : Str();
+        Str Lh = L ? Sha256Hex(Lc) : Str();
         Str path = FilePathOf(p->folder, id);
         if (!L && !R) continue; // 两边都没了，状态丢掉
         bool lc = !S || !L || Lh != S->local;
         bool rc = !S || !R || R->sha != S->remote;
         bool fail = false;
-        if (S && !lc && !rc) { p->SetState(id, S->local, S->remote); continue; }
+        if (S && !lc && !rc) { p->SetState(id, S->local, S->remote, S->base); continue; }
         if (S && lc && !rc)
         {
             if (!L)
@@ -369,8 +501,8 @@ static void Compute(Plan* p)
             }
             Str sha = WriteRemote(c, path, *L, S->remote, &fail); // 本地改了 -> 推上去
             if (fail) FAIL();
-            if (sha.n) { p->SetState(id, Lh, sha); p->pushed++; }
-            else p->SetState(id, S->local, S->remote); // 冲突了，下一轮按“两边都改了”处理
+            if (sha.n) { p->SetState(id, Lh, sha, Lc); p->pushed++; }
+            else p->SetState(id, S->local, S->remote, S->base); // 冲突了，下一轮按“两边都改了”处理
             continue;
         }
         if (S && !lc && rc)
@@ -378,9 +510,10 @@ static void Compute(Plan* p)
             if (!R) { p->localDeletes.Push(id); p->deletedN++; continue; } // 远端删了 -> 本地进回收站
             Str content, sha;
             if (!ReadRemote(c, path, &content, &sha)) FAIL();
-            Pull pl; pl.id = id; pl.content = content;
+            Str rc_ = Canon(content, id);
+            Pull pl; pl.id = id; pl.content = content; pl.base0 = S->base;
             p->pulls.Push(pl);
-            p->SetState(id, Sha256Hex(content), sha);
+            p->SetState(id, Sha256Hex(rc_), sha, rc_);
             p->pulled++;
             continue;
         }
@@ -389,31 +522,44 @@ static void Compute(Plan* p)
         {
             Str sha = WriteRemote(c, path, *L, Str(), &fail);
             if (fail) FAIL();
-            if (sha.n) { p->SetState(id, Lh, sha); p->pushed++; }
+            if (sha.n) { p->SetState(id, Lh, sha, Lc); p->pushed++; }
             continue;
         }
         if (!L && R)
         {
             Str content, sha;
             if (!ReadRemote(c, path, &content, &sha)) FAIL();
+            Str rc_ = Canon(content, id);
             Pull pl; pl.id = id; pl.content = content;
             p->pulls.Push(pl);
-            p->SetState(id, Sha256Hex(content), sha);
+            p->SetState(id, Sha256Hex(rc_), sha, rc_);
             p->pulled++;
             continue;
         }
         Str content, sha;
         if (!ReadRemote(c, path, &content, &sha)) FAIL();
-        if (Norm(content) != Norm(*L))
+        Str Rc = Canon(content, id);
+        if (Rc == Lc) { p->SetState(id, Lh, sha, Lc); continue; } // 内容其实一样（只是排版不同）
+        // 两边都改了：有底稿就按条目三方合并，合并结果写回远端、更新到本地
+        Str merged = S && S->base.n ? MergeNote(S->base, Lc, Rc, id) : Str();
+        if (merged.n)
         {
-            // 两边内容不一样：远端那份留在原便签，本地这份另存为一张新便签，谁的都不丢
-            Pull pl; pl.id = id; pl.content = content;
+            Str nsha = WriteRemote(c, path, merged, sha, &fail);
+            if (fail) FAIL();
+            if (nsha.Empty()) { p->SetState(id, S->local, S->remote, S->base); continue; } // 远端又被改了：下一轮再合并
+            Pull pl; pl.id = id; pl.content = merged; pl.base0 = S->base;
             p->pulls.Push(pl);
-            Pull cp; cp.id = id; cp.content = *L;
-            p->copies.Push(cp);
-            p->conflicts++;
+            p->SetState(id, Sha256Hex(merged), nsha, merged);
+            p->merged++;
+            continue;
         }
-        p->SetState(id, Sha256Hex(content), sha);
+        // 没有底稿（第一次同步、旧版本的同步状态）：远端那份留在原便签，本地这份另存为一张新便签，谁的都不丢
+        Pull pl; pl.id = id; pl.content = content;
+        p->pulls.Push(pl);
+        Pull cp; cp.id = id; cp.content = *L;
+        p->copies.Push(cp);
+        p->conflicts++;
+        p->SetState(id, Sha256Hex(Rc), sha, Rc);
     }
 #undef FAIL
 }
@@ -657,7 +803,13 @@ void SyncOnDone(Syncer* s, LPARAM lp)
             const Str& id = p->pulls[i].id;
             NoteWin* w = g_app->Find(id);
             const Str* snap = p->Local(id);
-            if (w && snap && w->d->ContentJson() != *snap) { p->DropState(id); continue; } // 同步期间本地又改了：下一轮再处理，不丢本地的
+            if (w && snap && w->d->ContentJson() != *snap)
+            {
+                // 同步期间本地又改了：不拿远端的盖掉。记成「本地是同步开始时那份、远端未知」，
+                // 下一轮按两边都改了，用原来的底稿再合并一次，两边的改动都留下
+                p->SetState(id, Sha256Hex(*snap), Str(), p->pulls[i].base0);
+                continue;
+            }
             NoteData* fresh = NoteData::FromContentJson(p->pulls[i].content, id);
             if (!fresh) continue;
             if (w) w->ReloadFrom(fresh, true);
@@ -680,6 +832,7 @@ void SyncOnDone(Syncer* s, LPARAM lp)
         if (p->pushed) { Str t(L"上传 "); t.Int(p->pushed); parts.Push(t); }
         if (p->pulled) { Str t(L"下载 "); t.Int(p->pulled); parts.Push(t); }
         if (p->deletedN) { Str t(L"删除 "); t.Int(p->deletedN); parts.Push(t); }
+        if (p->merged) { Str t(L"合并 "); t.Int(p->merged); parts.Push(t); }
         if (p->conflicts) { Str t(L"冲突 "); t.Int(p->conflicts).Append(L"（已另存副本）"); parts.Push(t); }
         if (parts.n)
         {

@@ -190,22 +190,63 @@ static void SyncTests(const Str& server, const Str& key)
     Check(L"本地修改自动推上去", RemoteRead(server, key, path, nullptr).Find(L"本地刚加的") >= 0);
     WaitUntil(idle, 10000);
 
-    // 两边同时改：本地那份另存为冲突副本
-    Str t2 = RemoteRead(server, key, path, &sha);
-    NoteData* other2 = NoteData::FromContentJson(t2, a->d->id);
-    other2->title = L"远端改的标题";
-    RemoteWrite(server, key, path, other2->ContentJson(), sha);
-    delete other2;
-    a->d->title = L"本地改的标题";
-    a->TestTypeItem(a->d->items.n, L"冲突时本地加的");
-    SyncNow(app->sync);
     auto findCopy = [&]() -> NoteWin* { for (int i = 0; i < app->notes.n; i++) if (app->notes[i]->d->title.EndsWith(L"（冲突副本）")) return app->notes[i]; return nullptr; };
-    WaitUntil([&]() { return findCopy() != nullptr; }, 15000);
+    // 改远端。推送会让本地马上同步，所以要测「两边都改了」就先改本地、紧接着改远端（本地的推送要等 1.5 秒）
+    auto remoteEdit = [&](void (*fn)(NoteData*)) {
+        Str t = RemoteRead(server, key, path, &sha);
+        NoteData* o = NoteData::FromContentJson(t, a->d->id);
+        fn(o);
+        // 换一种排版写回（网页、App 写的就和桌面端排得不一样）
+        RemoteWrite(server, key, path, o->ContentJson().Replace(L"\r\n", L"\n").Replace(L"  ", L"\t"), sha);
+        delete o;
+    };
+
+    // 两边同时改了不同的地方：按条目合并，不生成副本
     WaitUntil(idle, 10000);
-    NoteWin* copy = findCopy();
-    Check(L"冲突时生成副本", copy != nullptr);
-    Check(L"原便签是远端版本", a->d->title.Eq(L"远端改的标题"), a->d->title);
-    Check(L"副本里保留本地的修改", copy && HasItem(copy->d, L"冲突时本地加的"));
+    Str first = a->d->items[0].text;
+    a->TestTypeItem(a->d->items.n, L"冲突时本地加的");
+    remoteEdit([](NoteData* o) {
+        o->title = L"远端改的标题";
+        o->items[0].done = true;
+        NoteItem ri; ri.text = L"远端加的";
+        o->items.Push(ri);
+    });
+    SyncNow(app->sync);
+    WaitUntil([&]() { return HasItem(a->d, L"远端加的") && HasItem(a->d, L"冲突时本地加的"); }, 15000);
+    WaitUntil(idle, 10000);
+    Check(L"两边改了不同地方：合并而不是另存副本", findCopy() == nullptr);
+    Check(L"合并后有远端改的标题", a->d->title.Eq(L"远端改的标题"), a->d->title);
+    Check(L"合并后两边加的条目都在", HasItem(a->d, L"远端加的") && HasItem(a->d, L"冲突时本地加的"));
+    Check(L"合并后远端的勾选也在", a->d->items.n > 0 && a->d->items[0].text == first && a->d->items[0].done);
+    Str merged = RemoteRead(server, key, path, nullptr);
+    Check(L"合并结果写回了远端", merged.Find(L"远端加的") >= 0 && merged.Find(L"冲突时本地加的") >= 0);
+
+    // 同一条两边改成了不同的文字：两个版本都留下
+    WaitUntil(idle, 10000);
+    for (int i = 0; i < a->d->items.n; i++) if (a->d->items[i].text.Eq(L"远端加的")) a->TestTypeItem(i, L"远端加的（本地改）");
+    remoteEdit([](NoteData* o) { for (int i = 0; i < o->items.n; i++) if (o->items[i].text.Eq(L"远端加的")) o->items[i].text = L"远端加的（远端改）"; });
+    SyncNow(app->sync);
+    WaitUntil([&]() { return HasItem(a->d, L"远端加的（远端改）"); }, 15000);
+    WaitUntil(idle, 10000);
+    Check(L"同一条两边都改了：两个版本都留下", HasItem(a->d, L"远端加的（远端改）") && HasItem(a->d, L"远端加的（本地改）") && findCopy() == nullptr);
+
+    // 两边改成了一样的内容，只是排版不同：不算冲突
+    WaitUntil(idle, 10000);
+    a->TestTypeItem(a->d->items.n, L"两边都加的");
+    remoteEdit([](NoteData* o) { NoteItem ri; ri.text = L"两边都加的"; o->items.Push(ri); });
+    SyncNow(app->sync);
+    WaitUntil(idle, 15000);
+    Pump(500);
+    WaitUntil(idle, 10000);
+    int both = 0;
+    for (int i = 0; i < a->d->items.n; i++) if (a->d->items[i].text.Eq(L"两边都加的")) both++;
+    Check(L"内容一样只是排版不同：不重复、不另存副本", both == 1 && findCopy() == nullptr, Num(both));
+
+    // 删除测试用的便签（原来用冲突副本，现在不生成副本了）
+    app->CreateNoteFromContent(a->d->ContentJson(), L"（删除测试）");
+    NoteWin* copy = nullptr;
+    for (int i = 0; i < app->notes.n; i++) if (app->notes[i]->d->title.EndsWith(L"（删除测试）")) copy = app->notes[i];
+    WaitUntil(idle, 10000);
 
     // 本地删除：远端也删
     SyncNow(app->sync);
