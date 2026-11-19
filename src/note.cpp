@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <commdlg.h>
+#include <imm.h>
 
 // =====================================================================
 // 绘图资源
@@ -213,10 +214,10 @@ static void DrawLayout(ID2D1RenderTarget* rt, float x, float y, IDWriteTextLayou
 // 创建、销毁
 // =====================================================================
 static const wchar_t* NoteClass = L"DeskNoteNote";
-static const wchar_t* EditHostClass = L"DeskNoteEditHost";
 static const wchar_t* PreviewClass = L"DeskNotePreview";
-enum { TimerHide = 1, TimerSlide = 2, TimerProgman = 3 };
+enum { TimerHide = 1, TimerSlide = 2, TimerProgman = 3, TimerCaret = 4 };
 
+bool NoteWin::debugNoFocus = false;
 NoteWin::NoteWin(NoteData* data) : d(data) {}
 NoteWin::~NoteWin()
 {
@@ -241,9 +242,6 @@ static void RegisterNoteClasses()
     wc.lpszClassName = NoteClass;
     RegisterClassW(&wc);
     wc.style = 0;
-    wc.lpfnWndProc = NoteWin::EditHostProc;
-    wc.lpszClassName = EditHostClass;
-    RegisterClassW(&wc);
     wc.lpfnWndProc = NoteWin::PreviewProc;
     wc.hCursor = LoadCursorW(nullptr, IDC_HAND);
     wc.lpszClassName = PreviewClass;
@@ -416,7 +414,12 @@ void NoteWin::Render()
         float titleRight = showUi ? tbRight - 3 * btn - 2 * btnGap - 8 : right;
         IDWriteTextLayout* lt = MakeLayout(d->title, ft, titleRight - left, 0);
         float titleH = Max(LayoutHeight(lt), btn);
-        if (editIndex == TitleIndex) titleH = Max(titleH, editHeightDip);
+        if (editIndex == TitleIndex)
+        {
+            titleH = Max(btn, EditMeasure(right - left, 0));
+            Ui::Fill(rt, D2D1::RectF(left - 8, y - 2, right + 8, y + titleH + 2), 6, Argb(d->textColor, 0.08f));
+            DrawEditor(rt, left, y, right - left, titleH, true);
+        }
         else DrawLayout(rt, left, y + (titleH - LayoutHeight(lt)) / 2, lt, fg, d->shadow, shadow);
         float tcy = y + titleH / 2;
         static const wchar_t glyphs[3] = { 0xE710, 0xE712, 0xE73F };
@@ -456,7 +459,7 @@ void NoteWin::Render()
             bool dimmed = real && d->checkboxes && it->done;
             IDWriteTextLayout* l = nullptr;
             float h;
-            if (editingRow) h = Max(lineH, editHeightDip);
+            if (editingRow) h = EditMeasure(avail, lineH);
             else
             {
                 l = ItemLayout(d, *it, fb, ItemTextWidth(d, *it, avail), nullptr, false);
@@ -472,11 +475,13 @@ void NoteWin::Render()
                     for (int k = 0; k < 2; k++)
                         Ui::Circle(rt, cx - 2.5f + k * 5, cy + r * 5, 1.3f, Argb(d->textColor, 0.6f));
             }
+            if (editingRow) Ui::Fill(rt, D2D1::RectF(6, y - gap / 2, W - 6, y + h + gap / 2), 6, Argb(d->textColor, 0.08f));
             if (d->checkboxes)
             {
                 float size = CheckSize(d);
                 DrawCheck(rt, d, left, y + (lineH - size) / 2, size, real && it->done && !editingRow, rowHot, rowAlpha);
             }
+            if (editingRow) DrawEditor(rt, textX, y, avail, h, false);
             float chipLeft = 0;
             if (l)
             {
@@ -745,200 +750,603 @@ void NoteWin::EndReorder()
 }
 
 // =====================================================================
-// 编辑：在条目上盖一个系统输入框（中文输入法、复制粘贴都是系统原生的）
+// 编辑：直接在便签里画正在编辑的文字（和显示时同一套排版、彩色 emoji），
+// 光标、选区、键盘、剪贴板、输入法都自己处理
 // =====================================================================
+static bool IsSpaceCh(wchar_t c) { return c == L' ' || c == L'\t' || c == L'\n' || c == 0x3000; }
+// 按词移动用的字符分类：空白、字母数字、汉字、代理对（emoji 等）、标点
+static int CharClass(wchar_t c)
+{
+    if (IsSpaceCh(c)) return 0;
+    if ((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || c == L'_' || (c >= 0xC0 && c < 0x2000)) return 1;
+    if ((c >= 0x2E80 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF)) return 2;
+    if (c >= 0xD800 && c <= 0xDFFF) return 3;
+    return 4;
+}
+
 void NoteWin::BeginEdit(int index)
 {
     CommitEdit(true);
     if (d->collapsed) Expand();
     editIndex = index;
     editOrig = index == TitleIndex ? d->title : index >= 0 && index < d->items.n ? d->items[index].text : Str();
-    editHeightDip = index == TitleIndex ? 24 : LineH(d);
-    Render();
-    OpenEditor();
-    Render();
-    PositionEditor();
+    editText = editOrig;
+    caret = anchor = editText.n;
+    compText = Str();
+    compCursor = 0;
+    editGoalX = -1;
+    editUndo.Clear();
+    editRedo.Clear();
+    editLastKind = 0;
+    editSelecting = false;
+    if (!debugNoFocus)
+    {
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+    }
+    // 系统光标不显示，只是让输入法、读屏软件知道光标在哪
+    CreateCaret(hwnd, nullptr, 1, (int)(LineH(d) * Scale()));
+    EditUpdated();
 }
 
-LRESULT CALLBACK EditSubclass(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR ref)
+// 正在编辑的文字的排版：输入法组字插在光标处；末尾是换行时补一个零宽字符，光标才能落到新的一行
+IDWriteTextLayout* NoteWin::EditLayout(int* dispCaret)
 {
-    NoteWin* self = (NoteWin*)ref;
-    if (m == WM_KEYDOWN)
-    {
-        bool handled = false;
-        self->OnEditKey(w, &handled);
-        if (handled) return 0;
-    }
-    else if (m == WM_CHAR && (w == L'\r' || w == 27 || w == 1)) return 0; // 回车、Esc、Ctrl+A 的字符不进输入框
-    else if (m == WM_KILLFOCUS)
-    {
-        HWND to = (HWND)w;
-        if (to != self->editHost && to != h && self->Editing()) PostMessageW(self->hwnd, WM_APP_COMMITEDIT, 0, 0);
-    }
-    return DefSubclassProc(h, m, w, l);
-}
-
-void NoteWin::OnEditKey(WPARAM vk, bool* handled)
-{
-    bool shift = GetKeyState(VK_SHIFT) < 0, ctrl = GetKeyState(VK_CONTROL) < 0;
-    if (vk == VK_RETURN && shift)
-    {
-        // Shift+Enter：在这一条里换行（标题不换行）
-        if (editIndex != TitleIndex) SendMessageW(editCtl, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
-        *handled = true;
-    }
-    else if (vk == VK_RETURN)
-    {
-        // 新增的条目按 Enter 后接着写下一条；空着按 Enter 就结束
-        int len = GetWindowTextLengthW(editCtl);
-        bool continueAdding = editIndex == d->items.n && len > 0;
-        CommitEdit(true);
-        if (continueAdding) BeginEdit(d->items.n);
-        *handled = true;
-    }
-    else if (vk == VK_ESCAPE) { CommitEdit(false); *handled = true; }
-    else if (ctrl && vk == 'A') { SendMessageW(editCtl, EM_SETSEL, 0, -1); *handled = true; }
-}
-
-void NoteWin::OpenEditor()
-{
-    float S = Scale();
     bool title = editIndex == TitleIndex;
-    float size = title ? TitleSize(d) : (float)d->fontSize;
-    editFont = CreateFontW(-(int)(size * S + 0.5f), 0, 0, 0, title ? 700 : d->fontWeight, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
-                           CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-    u32 bg = d->bgColor;
-    int r = ((bg >> 16) & 255) * 3 / 4, g = ((bg >> 8) & 255) * 3 / 4, b = (bg & 255) * 3 / 4;
-    editBrush = CreateSolidBrush(RGB(r, g, b));
-    editHost = CreateWindowExW(WS_EX_TOOLWINDOW, EditHostClass, L"DeskNote 编辑", WS_POPUP, 0, 0, 10, 10, hwnd, nullptr, g_inst, this);
-    DWORD style = WS_CHILD | WS_VISIBLE | (title ? ES_AUTOHSCROLL : (ES_MULTILINE | ES_AUTOVSCROLL));
-    editCtl = CreateWindowExW(0, L"EDIT", L"", style, 0, 0, 10, 10, editHost, (HMENU)1, g_inst, nullptr);
-    SendMessageW(editCtl, WM_SETFONT, (WPARAM)editFont, FALSE);
-    SendMessageW(editCtl, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM((int)(2 * S), (int)(2 * S)));
-    SetWindowTextW(editCtl, editOrig.Replace(L"\n", L"\r\n").c());
-    SetWindowSubclass(editCtl, EditSubclass, 1, (DWORD_PTR)this);
-    PositionEditor();
-    ShowWindow(editHost, SW_SHOW);
-    SetForegroundWindow(editHost);
-    SetFocus(editCtl);
-    int len = GetWindowTextLengthW(editCtl);
-    SendMessageW(editCtl, EM_SETSEL, len, len);
+    Str s = editText;
+    int c = caret;
+    if (compText.n) { s = editText.Sub(0, caret) + compText + editText.Sub(caret); c = caret + compCursor; }
+    if (s.n && s.p[s.n - 1] == L'\n') s.Ch(0x200B);
+    IDWriteTextFormat* f = title ? MakeFormat(TitleSize(d), 700, true) : MakeFormat((float)d->fontSize, d->fontWeight, true);
+    if (!f) return nullptr;
+    IDWriteTextLayout* l = MakeLayout(s, f, editW, title ? 0 : LineH(d));
+    SafeRelease(f);
+    if (l && compText.n) l->SetUnderline(TRUE, { (UINT32)caret, (UINT32)compText.n });
+    if (dispCaret) *dispCaret = c;
+    return l;
 }
 
-void NoteWin::PositionEditor()
+float NoteWin::EditMeasure(float w, float minH)
 {
-    if (!editHost) return;
-    float S = Scale();
-    RECT wr;
-    GetWindowRect(hwnd, &wr);
-    float x0 = PadX, y0 = PadTop, x1;
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    x1 = rc.right / S - PadX;
-    if (editIndex == TitleIndex) y0 = PadTop - scrollY;
+    editW = w;
+    IDWriteTextLayout* l = EditLayout(nullptr);
+    if (!l) return minH;
+    float h = Max(minH, LayoutHeight(l));
+    l->Release();
+    return h;
+}
+
+// 画编辑中的文字：选区底色、文字、组字下划线、光标。(x, y) 是窗口坐标（已减去滚动）
+void NoteWin::DrawEditor(ID2D1RenderTarget* rt, float x, float y, float w, float h, bool centerV)
+{
+    editW = w;
+    int dc = 0;
+    IDWriteTextLayout* l = EditLayout(&dc);
+    if (!l) return;
+    float lh = LayoutHeight(l);
+    float ty = centerV ? y + Max(0.f, (h - lh) / 2) : y;
+    editBox = D2D1::RectF(x, ty + scrollY, x + w, ty + scrollY + Max(lh, h - (ty - y)));
+    // 选区
+    int a = Min(caret, anchor), b = Max(caret, anchor);
+    if (b > a && !compText.n)
+    {
+        UINT32 cnt = 0;
+        l->HitTestTextRange(a, b - a, x, ty, nullptr, 0, &cnt);
+        if (cnt)
+        {
+            DWRITE_HIT_TEST_METRICS* ms = (DWRITE_HIT_TEST_METRICS*)MemAlloc(sizeof(DWRITE_HIT_TEST_METRICS) * cnt);
+            l->HitTestTextRange(a, b - a, x, ty, ms, cnt, &cnt);
+            for (UINT32 i = 0; i < cnt; i++)
+                Ui::Fill(rt, D2D1::RectF(ms[i].left, ms[i].top, ms[i].left + Max(ms[i].width, 4.f), ms[i].top + ms[i].height), 0,
+                         Argb(d->textColor, 0.3f));
+            MemFree(ms);
+        }
+    }
+    // 空的新条目：灰色提示
+    if (!editText.n && !compText.n && editIndex != TitleIndex)
+    {
+        IDWriteTextFormat* f = MakeFormat((float)d->fontSize, d->fontWeight, true);
+        IDWriteTextLayout* ph = MakeLayout(Str(L"输入内容，Enter 保存，Esc 取消"), f, w, LineH(d));
+        ID2D1SolidColorBrush* pb = nullptr;
+        rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 0.35f), &pb);
+        if (ph && pb) rt->DrawTextLayout(D2D1::Point2F(x, ty), ph, pb);
+        SafeRelease(pb); SafeRelease(ph); SafeRelease(f);
+    }
+    ID2D1SolidColorBrush* tb = nullptr;
+    rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 1), &tb);
+    if (tb) rt->DrawTextLayout(D2D1::Point2F(x, ty), l, tb, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    SafeRelease(tb);
+    // 光标位置（输入法候选框、滚动都要用，所以总是算；有选区时不画）
+    DWRITE_HIT_TEST_METRICS m = {};
+    float px = 0, py = 0;
+    l->HitTestTextPosition(dc, FALSE, &px, &py, &m);
+    float ch = m.height > 0 ? m.height : (editIndex == TitleIndex ? TitleSize(d) * 1.3f : LineH(d));
+    caretBox = D2D1::RectF(x + px, ty + py + scrollY, x + px + 1.5f, ty + py + ch + scrollY);
+    if (caretOn && (caret == anchor || compText.n))
+        Ui::Fill(rt, D2D1::RectF(x + px, ty + py, x + px + Max(1.5f, R1(1.5f)), ty + py + ch), 0, Argb(d->textColor, 1));
+    l->Release();
+}
+
+// 鼠标位置（窗口 DIP）-> 文字里的位置
+int NoteWin::EditHit(float xd, float yd)
+{
+    IDWriteTextLayout* l = EditLayout(nullptr);
+    if (!l) return caret;
+    BOOL trailing = FALSE, inside = FALSE;
+    DWRITE_HIT_TEST_METRICS m = {};
+    l->HitTestPoint(xd - editBox.left, yd + scrollY - editBox.top, &trailing, &inside, &m);
+    l->Release();
+    return Clamp((int)(m.textPosition + (trailing ? m.length : 0)), 0, editText.n);
+}
+
+bool NoteWin::InEditBox(float xd, float yd) const
+{
+    float y = yd + scrollY;
+    return Editing() && xd >= editBox.left - 6 && xd < editBox.right + 6 && y >= editBox.top - 4 && y < editBox.bottom + 4;
+}
+
+// 光标能停的位置：按字形簇走（emoji、组合字符算一个）；word = 按词
+int NoteWin::EditStep(int pos, int dir, bool word)
+{
+    const wchar_t* t = editText.p;
+    int n = editText.n;
+    if (word)
+    {
+        int p = pos;
+        if (dir < 0)
+        {
+            while (p > 0 && IsSpaceCh(t[p - 1])) p--;
+            if (p > 0) { int c = CharClass(t[p - 1]); while (p > 0 && CharClass(t[p - 1]) == c) p--; }
+        }
+        else
+        {
+            if (p < n) { int c = CharClass(t[p]); while (p < n && CharClass(t[p]) == c) p++; }
+            while (p < n && IsSpaceCh(t[p])) p++;
+        }
+        return p;
+    }
+    Str saveComp = compText;
+    compText = Str();
+    IDWriteTextLayout* l = EditLayout(nullptr);
+    compText = saveComp;
+    int result = Clamp(pos + dir, 0, n);
+    if (l)
+    {
+        UINT32 cnt = 0;
+        l->GetClusterMetrics(nullptr, 0, &cnt);
+        if (cnt)
+        {
+            DWRITE_CLUSTER_METRICS* cm = (DWRITE_CLUSTER_METRICS*)MemAlloc(sizeof(DWRITE_CLUSTER_METRICS) * cnt);
+            l->GetClusterMetrics(cm, cnt, &cnt);
+            int p = 0, prev = 0;
+            result = dir < 0 ? 0 : n;
+            for (UINT32 i = 0; i < cnt; i++)
+            {
+                int next = Min(p + (int)cm[i].length, n);
+                if (dir < 0 && next >= pos) { result = p < pos ? p : prev; break; }
+                if (dir > 0 && p >= pos && next > pos) { result = next; break; }
+                prev = p;
+                p = next;
+            }
+            MemFree(cm);
+        }
+        l->Release();
+    }
+    return Clamp(result, 0, n);
+}
+
+// what：0 行首，1 行尾，-1 上一行，+1 下一行（保持同一列）
+int NoteWin::EditLineMove(int pos, int what)
+{
+    IDWriteTextLayout* l = EditLayout(nullptr);
+    if (!l) return pos;
+    int n = editText.n, result = pos;
+    UINT32 lc = 0;
+    l->GetLineMetrics(nullptr, 0, &lc);
+    DWRITE_LINE_METRICS* lm = lc ? (DWRITE_LINE_METRICS*)MemAlloc(sizeof(DWRITE_LINE_METRICS) * lc) : nullptr;
+    if (lm) l->GetLineMetrics(lm, lc, &lc);
+    if (what == 0 || what == 1)
+    {
+        int start = 0;
+        for (UINT32 i = 0; i < lc; i++)
+        {
+            int len = (int)lm[i].length;
+            if (pos < start + len || i == lc - 1)
+            {
+                result = what == 0 ? start : start + len - (int)lm[i].newlineLength;
+                // 自动折行处的行尾：退到行尾空格前，免得光标跑到下一行开头
+                if (what == 1 && lm[i].newlineLength == 0 && i < lc - 1)
+                    while (result > start && result <= n && IsSpaceCh(editText.p[result - 1])) result--;
+                break;
+            }
+            start += len;
+        }
+    }
     else
     {
-        bool found = false;
-        for (int i = 0; i < rows.n; i++)
-            if (rows[i].index == editIndex) { y0 = rows[i].top - scrollY; x0 = rows[i].textLeft; found = true; break; }
-        if (!found) return;
+        DWRITE_HIT_TEST_METRICS m = {};
+        float px = 0, py = 0;
+        l->HitTestTextPosition(Min(pos, n), FALSE, &px, &py, &m);
+        if (editGoalX < 0) editGoalX = px;
+        float y = what < 0 ? py - 1 : py + m.height + 1;
+        DWRITE_TEXT_METRICS tm = {};
+        l->GetMetrics(&tm);
+        if (y < 0) result = 0;
+        else if (y >= tm.height) result = n;
+        else
+        {
+            BOOL tr = FALSE, in = FALSE;
+            l->HitTestPoint(editGoalX, y, &tr, &in, &m);
+            result = (int)(m.textPosition + (tr ? m.length : 0));
+        }
     }
-    // 输入框需要的高度：行数 × 行高
-    HDC dc = GetDC(editCtl);
-    HGDIOBJ of = SelectObject(dc, editFont);
-    TEXTMETRICW tm;
-    GetTextMetricsW(dc, &tm);
-    SelectObject(dc, of);
-    ReleaseDC(editCtl, dc);
-    int lines = editIndex == TitleIndex ? 1 : (int)SendMessageW(editCtl, EM_GETLINECOUNT, 0, 0);
-    int hpx = Max(1, lines) * tm.tmHeight + (int)(4 * S);
-    float need = hpx / S;
-    float base = editIndex == TitleIndex ? 28.f : LineH(d);
-    if (need < base) { need = base; hpx = (int)(base * S + 0.5f); }
-    int x = wr.left + (int)((x0 - 2) * S), y = wr.top + (int)(y0 * S);
-    int w = (int)((x1 - x0 + 4) * S);
-    SetWindowPos(editHost, HWND_TOP, x, y, w, hpx, SWP_NOACTIVATE);
-    MoveWindow(editCtl, 0, (hpx - Max(1, lines) * tm.tmHeight) / 2, w, Max(1, lines) * tm.tmHeight + 2, TRUE);
-    if (need != editHeightDip) { editHeightDip = need; Render(); }
+    MemFree(lm);
+    l->Release();
+    return Clamp(result, 0, n);
 }
 
-void NoteWin::CloseEditor()
+void NoteWin::EditSetCaret(int pos, bool extend)
 {
-    if (editCtl) RemoveWindowSubclass(editCtl, EditSubclass, 1);
-    if (editHost) { HWND h = editHost; editHost = nullptr; editCtl = nullptr; DestroyWindow(h); }
-    if (editFont) { DeleteObject(editFont); editFont = nullptr; }
-    if (editBrush) { DeleteObject(editBrush); editBrush = nullptr; }
+    caret = Clamp(pos, 0, editText.n);
+    if (!extend) anchor = caret;
+    editLastKind = 0;
+    EditUpdated();
 }
 
-LRESULT CALLBACK NoteWin::EditHostProc(HWND h, UINT m, WPARAM w, LPARAM l)
+// 把 [a, b) 换成 s；kind：1 打字，2 删除（连续的同类操作合成一步撤销），0 其他
+void NoteWin::EditReplace(int a, int b, const Str& s, int kind)
 {
-    NoteWin* self = (NoteWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (m == WM_NCCREATE)
+    Str ins = s.Replace(L"\r\n", L"\n").Replace(L"\r", L"\n");
+    if (editIndex == TitleIndex) ins = ins.Replace(L"\n", L" ");
+    if (!(kind && kind == editLastKind && a == editLastPos))
     {
-        self = (NoteWin*)((CREATESTRUCTW*)l)->lpCreateParams;
-        SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
+        EditSnap snap = { editText, caret, anchor };
+        editUndo.Push(snap);
+        if (editUndo.n > 100) editUndo.RemoveAt(0);
     }
-    if (!self) return DefWindowProcW(h, m, w, l);
+    editRedo.Clear();
+    editText = editText.Sub(0, a) + ins + editText.Sub(b);
+    caret = anchor = a + ins.n;
+    editLastKind = kind;
+    editLastPos = kind == 2 ? a : caret;
+    EditUpdated();
+}
+
+void NoteWin::EditInsert(const Str& s, int kind)
+{
+    EditReplace(Min(caret, anchor), Max(caret, anchor), s, kind);
+}
+
+void NoteWin::EditUndoRedo(bool redoIt)
+{
+    Vec<EditSnap>& from = redoIt ? editRedo : editUndo;
+    Vec<EditSnap>& to = redoIt ? editUndo : editRedo;
+    if (!from.n) return;
+    EditSnap cur = { editText, caret, anchor };
+    to.Push(cur);
+    EditSnap s = from.Last();
+    from.RemoveAt(from.n - 1);
+    editText = s.text;
+    caret = s.caret;
+    anchor = s.anchor;
+    editLastKind = 0;
+    EditUpdated();
+}
+
+static void ClipSet(HWND h, const Str& s)
+{
+    Str t = s.Replace(L"\n", L"\r\n");
+    if (!OpenClipboard(h)) return;
+    EmptyClipboard();
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (t.n + 1) * sizeof(wchar_t));
+    if (g)
+    {
+        wchar_t* p = (wchar_t*)GlobalLock(g);
+        for (int i = 0; i < t.n; i++) p[i] = t.p[i];
+        p[t.n] = 0;
+        GlobalUnlock(g);
+        if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
+    }
+    CloseClipboard();
+}
+
+static Str ClipGet(HWND h)
+{
+    Str s;
+    if (!OpenClipboard(h)) return s;
+    HANDLE g = GetClipboardData(CF_UNICODETEXT);
+    if (g)
+    {
+        const wchar_t* p = (const wchar_t*)GlobalLock(g);
+        if (p) s = p;
+        GlobalUnlock(g);
+    }
+    CloseClipboard();
+    // 去掉控制字符（换行、Tab 保留）
+    Str out;
+    for (int i = 0; i < s.n; i++) if (s.p[i] >= 32 || s.p[i] == L'\n' || s.p[i] == L'\r' || s.p[i] == L'\t') out.Ch(s.p[i]);
+    return out;
+}
+
+void NoteWin::EditCopy(bool cut)
+{
+    int a = Min(caret, anchor), b = Max(caret, anchor);
+    if (b <= a) return;
+    ClipSet(hwnd, editText.Sub(a, b - a));
+    if (cut) EditReplace(a, b, Str(), 0);
+}
+
+void NoteWin::EditPaste()
+{
+    Str s = ClipGet(hwnd);
+    if (s.n) EditInsert(s, 0);
+}
+
+void NoteWin::EditSelectWord(int pos)
+{
+    int n = editText.n;
+    if (!n) return;
+    int p = Clamp(pos, 0, n - 1);
+    if (pos == n || (p > 0 && editText.p[p] == L'\n')) p = Max(0, pos - 1);
+    int c = CharClass(editText.p[p]);
+    int a = p, b = p + 1;
+    while (a > 0 && CharClass(editText.p[a - 1]) == c && editText.p[a - 1] != L'\n') a--;
+    while (b < n && CharClass(editText.p[b]) == c && editText.p[b] != L'\n') b++;
+    anchor = a;
+    caret = b;
+    editLastKind = 0;
+    EditUpdated();
+}
+
+// 键盘：返回 true 表示已处理
+bool NoteWin::EditKey(WPARAM vk)
+{
+    if (compText.n) return false; // 输入法组字时按键归输入法
+    bool shift = GetKeyState(VK_SHIFT) < 0, ctrl = GetKeyState(VK_CONTROL) < 0;
+    int n = editText.n;
+    bool hasSel = caret != anchor;
+    switch (vk)
+    {
+    case VK_LEFT: case VK_RIGHT:
+    {
+        int dir = vk == VK_RIGHT ? 1 : -1;
+        editGoalX = -1;
+        if (hasSel && !shift && !ctrl) EditSetCaret(dir < 0 ? Min(caret, anchor) : Max(caret, anchor), false);
+        else EditSetCaret(EditStep(caret, dir, ctrl), shift);
+        return true;
+    }
+    case VK_UP: case VK_DOWN:
+    {
+        float keep = editGoalX;
+        int p = EditLineMove(caret, vk == VK_UP ? -1 : 1);
+        float goal = editGoalX;
+        EditSetCaret(p, shift);
+        editGoalX = keep >= 0 ? keep : goal;
+        return true;
+    }
+    case VK_HOME: editGoalX = -1; EditSetCaret(ctrl ? 0 : EditLineMove(caret, 0), shift); return true;
+    case VK_END: editGoalX = -1; EditSetCaret(ctrl ? n : EditLineMove(caret, 1), shift); return true;
+    case VK_BACK:
+        if (hasSel) EditInsert(Str(), 0);
+        else if (caret > 0) EditReplace(EditStep(caret, -1, ctrl), caret, Str(), 2);
+        return true;
+    case VK_DELETE:
+        if (shift && hasSel) { EditCopy(true); return true; }
+        if (hasSel) EditInsert(Str(), 0);
+        else if (caret < n) EditReplace(caret, EditStep(caret, 1, ctrl), Str(), 2);
+        return true;
+    case VK_INSERT:
+        if (ctrl) EditCopy(false);
+        else if (shift) EditPaste();
+        return true;
+    case VK_RETURN:
+        if (shift)
+        {
+            if (editIndex != TitleIndex) EditInsert(Str(L"\n"), 0); // Shift+Enter：在这一条里换行
+            return true;
+        }
+        {
+            // 新增的条目按 Enter 后接着写下一条；空着按 Enter 就结束
+            bool continueAdding = editIndex == d->items.n && editText.Trim().n > 0;
+            CommitEdit(true);
+            if (continueAdding) BeginEdit(d->items.n);
+        }
+        return true;
+    case VK_ESCAPE: CommitEdit(false); return true;
+    case VK_TAB: return true;
+    }
+    if (ctrl)
+    {
+        switch (vk)
+        {
+        case 'A': anchor = 0; caret = n; editLastKind = 0; EditUpdated(); return true;
+        case 'C': EditCopy(false); return true;
+        case 'X': EditCopy(true); return true;
+        case 'V': EditPaste(); return true;
+        case 'Z': EditUndoRedo(shift); return true;
+        case 'Y': EditUndoRedo(true); return true;
+        }
+    }
+    return false;
+}
+
+void NoteWin::EditChar(wchar_t c)
+{
+    if (c < 32 || c == 127) return; // 回车、退格、Ctrl+字母产生的控制字符在 EditKey 里处理
+    EditInsert(Str(&c, 1), 1);
+}
+
+// 改完文字或挪了光标：光标重新亮起、重画、滚到看得见、告诉输入法光标在哪
+void NoteWin::EditUpdated()
+{
+    if (!Editing()) return;
+    caretOn = true;
+    SetTimer(hwnd, TimerCaret, GetCaretBlinkTime(), nullptr);
+    Render();
+    // 滚动到光标可见
+    float H = (float)d->height;
+    float top = PadTop, bottom = H - PadBottom;
+    float ns = scrollY;
+    if (caretBox.top - ns < top) ns = caretBox.top - top;
+    if (caretBox.bottom - ns > bottom) ns = caretBox.bottom - bottom;
+    ns = Max(0.f, ns);
+    if (ns != scrollY) { scrollY = ns; Render(); }
+    UpdateImePos();
+}
+
+void NoteWin::UpdateImePos()
+{
+    if (!Editing()) return;
+    float S = Scale();
+    POINT p = { (LONG)(caretBox.left * S), (LONG)((caretBox.top - scrollY) * S) };
+    LONG bottom = (LONG)((caretBox.bottom - scrollY) * S);
+    SetCaretPos(p.x, p.y);
+    HIMC imc = ImmGetContext(hwnd);
+    if (!imc) return;
+    COMPOSITIONFORM cf = {};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos = p;
+    ImmSetCompositionWindow(imc, &cf);
+    CANDIDATEFORM cand = {};
+    cand.dwIndex = 0;
+    cand.dwStyle = CFS_EXCLUDE;
+    cand.ptCurrentPos.x = p.x;
+    cand.ptCurrentPos.y = bottom;
+    cand.rcArea.left = p.x;
+    cand.rcArea.top = p.y;
+    cand.rcArea.right = p.x + 1;
+    cand.rcArea.bottom = bottom;
+    ImmSetCandidateWindow(imc, &cand);
+    ImmReleaseContext(hwnd, imc);
+}
+
+static Str ImeString(HIMC imc, DWORD which)
+{
+    LONG bytes = ImmGetCompositionStringW(imc, which, nullptr, 0);
+    Str s;
+    if (bytes <= 0) return s;
+    s.Reserve(bytes / 2 + 1);
+    ImmGetCompositionStringW(imc, which, s.p, bytes);
+    s.n = bytes / 2;
+    s.p[s.n] = 0;
+    return s;
+}
+
+// 输入法消息：组字直接画在光标处，候选框跟着光标；返回 true 表示已处理
+bool NoteWin::EditIme(UINT m, WPARAM w, LPARAM l, LRESULT* r)
+{
+    if (!Editing()) return false;
     switch (m)
     {
-    case WM_CTLCOLOREDIT:
-        SetTextColor((HDC)w, RGB((self->d->textColor >> 16) & 255, (self->d->textColor >> 8) & 255, self->d->textColor & 255));
-        {
-            LOGBRUSH lb;
-            GetObjectW(self->editBrush, sizeof(lb), &lb);
-            SetBkColor((HDC)w, lb.lbColor);
-        }
-        return (LRESULT)self->editBrush;
-    case WM_ERASEBKGND:
+    case WM_IME_SETCONTEXT:
+        *r = DefWindowProcW(hwnd, m, w, l & ~ISC_SHOWUICOMPOSITIONWINDOW);
+        return true;
+    case WM_IME_STARTCOMPOSITION:
+        if (caret != anchor) EditInsert(Str(), 0);
+        UpdateImePos();
+        *r = 0;
+        return true;
+    case WM_IME_COMPOSITION:
     {
-        RECT rc;
-        GetClientRect(h, &rc);
-        FillRect((HDC)w, &rc, self->editBrush);
-        return 1;
+        HIMC imc = ImmGetContext(hwnd);
+        if (imc)
+        {
+            if (l & GCS_RESULTSTR)
+            {
+                Str res = ImeString(imc, GCS_RESULTSTR);
+                compText = Str();
+                compCursor = 0;
+                if (res.n) EditInsert(res, 1);
+            }
+            if (l & GCS_COMPSTR)
+            {
+                compText = ImeString(imc, GCS_COMPSTR);
+                LONG cur = (l & GCS_CURSORPOS) ? ImmGetCompositionStringW(imc, GCS_CURSORPOS, nullptr, 0) : compText.n;
+                compCursor = Clamp((int)LOWORD(cur), 0, compText.n);
+            }
+            else if (!(l & GCS_RESULTSTR)) compText = Str();
+            ImmReleaseContext(hwnd, imc);
+        }
+        EditUpdated();
+        *r = 0;
+        return true;
     }
-    case WM_COMMAND:
-        if (HIWORD(w) == EN_CHANGE) self->PositionEditor();
-        return 0;
-    case WM_SETFOCUS:
-        if (self->editCtl) SetFocus(self->editCtl);
-        return 0;
+    case WM_IME_ENDCOMPOSITION:
+        compText = Str();
+        compCursor = 0;
+        EditUpdated();
+        *r = 0;
+        return true;
+    case WM_IME_CHAR:
+        *r = 0; // 结果已经在 WM_IME_COMPOSITION 里插进去了
+        return true;
     }
-    return DefWindowProcW(h, m, w, l);
+    return false;
+}
+
+// 结束输入法正在进行的组字（点鼠标、提交时）
+void NoteWin::EditFinishIme(bool cancel)
+{
+    if (!compText.n) return;
+    HIMC imc = ImmGetContext(hwnd);
+    if (imc)
+    {
+        ImmNotifyIME(imc, NI_COMPOSITIONSTR, cancel ? CPS_CANCEL : CPS_COMPLETE, 0);
+        ImmReleaseContext(hwnd, imc);
+    }
+    compText = Str();
+}
+
+void NoteWin::EditContextMenu(int sx, int sy)
+{
+    enum { CCut = 1, CCopy, CPaste, CAll };
+    bool sel = caret != anchor;
+    Ui::Menu m;
+    m.Item(CCut, L"剪切", 0xE8C6, L"Ctrl+X").disabled = !sel;
+    m.Item(CCopy, L"复制", 0xE8C8, L"Ctrl+C").disabled = !sel;
+    m.Item(CPaste, L"粘贴", 0xE77F, L"Ctrl+V").disabled = !IsClipboardFormatAvailable(CF_UNICODETEXT);
+    m.Sep();
+    m.Item(CAll, L"全选", 0xE8B3, L"Ctrl+A");
+    int cmd = Ui::MenuRun(hwnd, &m, sx, sy, nullptr, nullptr);
+    if (!Editing()) return;
+    switch (cmd)
+    {
+    case CCut: EditCopy(true); break;
+    case CCopy: EditCopy(false); break;
+    case CPaste: EditPaste(); break;
+    case CAll: anchor = 0; caret = editText.n; EditUpdated(); break;
+    }
 }
 
 void NoteWin::CommitEdit(bool save)
 {
     if (!Editing()) return;
+    EditFinishIme(true);
     int idx = editIndex;
-    Str text;
-    if (editCtl)
-    {
-        int len = GetWindowTextLengthW(editCtl);
-        Str raw;
-        raw.Reserve(len);
-        GetWindowTextW(editCtl, raw.p, len + 1);
-        raw.n = WLen(raw.p);
-        // 条目内部换行统一存成 \n，去掉每行行尾空格（Tab 保留），首尾空行去掉
-        Str norm = raw.Replace(L"\r\n", L"\n");
-        Str out;
-        int start = 0;
-        for (int i = 0; i <= norm.n; i++)
-            if (i == norm.n || norm.p[i] == L'\n')
-            {
-                int e = i;
-                while (e > start && norm.p[e - 1] == L' ') e--;
-                out.Append(norm.p + start, e - start);
-                if (i < norm.n) out.Ch(L'\n');
-                start = i + 1;
-            }
-        int a = 0, b = out.n;
-        while (a < b && (out.p[a] == L'\n' || out.p[a] == L' ')) a++;
-        while (b > a && (out.p[b - 1] == L'\n' || out.p[b - 1] == L' ')) b--;
-        text = out.Sub(a, b - a);
-        if (idx == TitleIndex) text = text.Replace(L"\n", L" ").Trim();
-    }
+    // 条目内部换行统一存成 \n，去掉每行行尾空格（Tab 保留），首尾空行去掉
+    Str norm = editText.Replace(L"\r\n", L"\n");
+    Str out;
+    int start = 0;
+    for (int i = 0; i <= norm.n; i++)
+        if (i == norm.n || norm.p[i] == L'\n')
+        {
+            int e = i;
+            while (e > start && norm.p[e - 1] == L' ') e--;
+            out.Append(norm.p + start, e - start);
+            if (i < norm.n) out.Ch(L'\n');
+            start = i + 1;
+        }
+    int a = 0, b = out.n;
+    while (a < b && (out.p[a] == L'\n' || out.p[a] == L' ')) a++;
+    while (b > a && (out.p[b - 1] == L'\n' || out.p[b - 1] == L' ')) b--;
+    Str text = out.Sub(a, b - a);
+    if (idx == TitleIndex) text = text.Replace(L"\n", L" ").Trim();
     editIndex = NotEditing;
-    CloseEditor();
+    editSelecting = false;
+    KillTimer(hwnd, TimerCaret);
+    DestroyCaret();
+    editUndo.Clear();
+    editRedo.Clear();
     if (pendingReload && changeDepth == 0)
     {
         // 编辑期间别处改了这张便签：先换成外部内容，再把这次编辑合进去
@@ -1039,8 +1447,27 @@ void NoteWin::OnLButtonDown(int x, int y, bool dbl)
         SendMessageW(hwnd, WM_SYSCOMMAND, 0xF000 + edge, 0);
         return;
     }
-    // 正在编辑时点到别处：先保存这一条
-    if (Editing()) { CommitEdit(true); return; }
+    // 正在编辑：点在编辑区里是挪光标（Shift 扩选、双击选词），点到别处先保存这一条
+    if (Editing())
+    {
+        float xd = x / S, yd = y / S;
+        if (InEditBox(xd, yd))
+        {
+            EditFinishIme(false);
+            int p = EditHit(xd, yd);
+            if (dbl) EditSelectWord(p);
+            else
+            {
+                editGoalX = -1;
+                EditSetCaret(p, GetKeyState(VK_SHIFT) < 0);
+                editSelecting = true;
+                SetCapture(hwnd);
+            }
+            return;
+        }
+        CommitEdit(true);
+        return;
+    }
     SetFocus(hwnd);
     if (GetKeyState(VK_CONTROL) < 0 && TryOpenLink(x, y)) return;
     float xd = x / S, yd = y / S;
@@ -1537,6 +1964,12 @@ void NoteWin::OnMenuLive(int id, float v)
 
 void NoteWin::OnContextMenu(int sx, int sy)
 {
+    if (Editing())
+    {
+        POINT ep = { sx, sy };
+        ScreenToClient(hwnd, &ep);
+        if (InEditBox(ep.x / Scale(), ep.y / Scale())) { EditContextMenu(sx, sy); return; }
+    }
     CommitEdit(true);
     ClosePreview();
     int target = NotEditing;
@@ -1744,7 +2177,8 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
         GetCursorPos(&p);
         ScreenToClient(hwnd, &p);
         LPCWSTR cur = IDC_ARROW;
-        if (!d->collapsed && dragIndex < 0)
+        if (Editing() && InEditBox(p.x / Scale(), p.y / Scale()) && !HitEdge(p.x, p.y)) cur = IDC_IBEAM;
+        else if (!d->collapsed && dragIndex < 0)
         {
             switch (HitEdge(p.x, p.y))
             {
@@ -1771,11 +2205,23 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
     }
     case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l), false); return 0;
     case WM_LBUTTONDBLCLK: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l), true); return 0;
-    case WM_LBUTTONUP: if (dragIndex >= 0) EndReorder(); return 0;
-    case WM_CAPTURECHANGED: if (dragIndex >= 0 && (HWND)l != hwnd) EndReorder(); return 0;
+    case WM_LBUTTONUP:
+        if (editSelecting) { editSelecting = false; if (GetCapture() == hwnd) ReleaseCapture(); }
+        if (dragIndex >= 0) EndReorder();
+        return 0;
+    case WM_CAPTURECHANGED:
+        if ((HWND)l != hwnd) editSelecting = false;
+        if (dragIndex >= 0 && (HWND)l != hwnd) EndReorder();
+        return 0;
     case WM_MOUSEMOVE:
     {
         if (dragIndex >= 0) { OnReorderMove(GET_Y_LPARAM(l) / Scale()); return 0; }
+        if (editSelecting && Editing())
+        {
+            int pos = EditHit(GET_X_LPARAM(l) / Scale(), GET_Y_LPARAM(l) / Scale());
+            if (pos != caret) EditSetCaret(pos, true);
+            return 0;
+        }
         bool entered = false;
         if (!hover)
         {
@@ -1817,7 +2263,7 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
         float H = rc.bottom / Scale();
         float maxScroll = Max(0.f, contentHeight - (H - PadTop - PadBottom));
         float ns = Clamp(scrollY - GET_WHEEL_DELTA_WPARAM(w) / 120.f * LineH(d) * 3, 0.f, maxScroll);
-        if (ns != scrollY) { scrollY = ns; Render(); PositionEditor(); }
+        if (ns != scrollY) { scrollY = ns; Render(); UpdateImePos(); }
         return 0;
     }
     case WM_RBUTTONUP:
@@ -1827,8 +2273,18 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
         OnContextMenu(p.x, p.y);
         return 0;
     }
+    case WM_CHAR:
+        if (Editing()) { EditChar((wchar_t)w); return 0; }
+        break;
+    case WM_IME_SETCONTEXT: case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION: case WM_IME_CHAR:
+    {
+        LRESULT r = 0;
+        if (EditIme(m, w, l, &r)) return r;
+        break;
+    }
     case WM_KEYDOWN:
     {
+        if (Editing()) { if (EditKey(w)) return 0; break; }
         bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
         if (ctrl && w == 'Z' && !shift) { Undo(); return 0; }
         if (ctrl && (w == 'Y' || (w == 'Z' && shift))) { Redo(); return 0; }
@@ -1838,16 +2294,11 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
         if (LOWORD(w) == WA_INACTIVE)
         {
             HWND to = (HWND)l;
-            if (Editing() && to != editHost) CommitEdit(true);
+            (void)to;
+            if (Editing()) CommitEdit(true);
             if (!Editing()) SendToBottom();
         }
         return 0;
-    case WM_APP_COMMITEDIT:
-    {
-        HWND f = GetFocus();
-        if (Editing() && f != editCtl) CommitEdit(true);
-        return 0;
-    }
     case WM_WINDOWPOSCHANGING:
     {
         WINDOWPOS* wp = (WINDOWPOS*)l;
@@ -1894,7 +2345,7 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
                 d->width = nw / S;
                 d->height = nh / S;
                 Render();
-                PositionEditor();
+                UpdateImePos();
             }
         }
         return 0;
@@ -1915,7 +2366,8 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
         return 0;
     }
     case WM_TIMER:
-        if (w == TimerHide) OnHideTimer();
+        if (w == TimerCaret) { caretOn = !caretOn; Render(); }
+        else if (w == TimerHide) OnHideTimer();
         else if (w == TimerSlide)
         {
             float t = Min(1.f, (GetTickCount() - slideStart) / 150.f);
@@ -1942,13 +2394,14 @@ LRESULT NoteWin::Handle(UINT m, WPARAM w, LPARAM l)
 void NoteWin::TestTypeItem(int index, const wchar_t* text)
 {
     BeginEdit(index);
-    SetWindowTextW(editCtl, text);
+    editText = text;
     CommitEdit(true);
 }
 void NoteWin::TestBeginEdit(int index, const wchar_t* text)
 {
     BeginEdit(index);
-    SetWindowTextW(editCtl, text);
+    editText = text;
+    caret = anchor = editText.n;
 }
 void NoteWin::TestMenuDelete(int index)
 {

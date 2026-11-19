@@ -591,6 +591,7 @@ extern "C" void __stdcall Start()
     g_app->Start();
     if (open.Eq(L"trash")) g_app->ShowTrash();
     else if (open.Eq(L"settings")) g_app->ShowSettings();
+    else if (open.StartsWith(L"edit") && open.n > 4 && g_app->notes.n) g_app->notes[0]->DebugEdit((int)ParseInt(open.Sub(4), 0));
     else if (open.Eq(L"edit") && g_app->notes.n) g_app->notes[0]->BeginEdit(0);            // 调界面用
     else if (open.Eq(L"capsule") && g_app->notes.n) g_app->notes[0]->Collapse();
     else if (open.Eq(L"preview") && g_app->notes.n) g_app->notes[0]->DebugPreview();

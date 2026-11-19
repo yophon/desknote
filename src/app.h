@@ -15,7 +15,6 @@
 // 程序内部消息
 #define WM_APP_TRAY        (WM_APP + 1)
 #define WM_APP_SYNCDONE    (WM_APP + 2)
-#define WM_APP_COMMITEDIT  (WM_APP + 3)
 
 // ---------------------------------------------------------------------
 // 绘图资源：Direct2D/DirectWrite 工厂，用时创建，空闲几秒后整体释放（省内存）
@@ -79,6 +78,15 @@ public:
     void DebugPreview() { Collapse(); ShowPreview(); KillTimer(hwnd, 1); }
     void DebugMenu(int sub);
     void DebugReminder(int i) { EditReminder(i); }
+    static bool debugNoFocus; // 调界面用：进入编辑时不抢前台和键盘焦点（截图时别吃掉用户正在打的字）
+    void DebugEdit(int mode)
+    {
+        debugNoFocus = true;
+        // 1：最后一条里选中一段；2：新条目（空的，显示提示）；3：编辑标题
+        if (mode == 1) { BeginEdit(d->items.n - 1); anchor = 4; caret = Min(editText.n, 16); EditUpdated(); }
+        else if (mode == 2) BeginEdit(d->items.n);
+        else if (mode == 3) BeginEdit(TitleIndex);
+    }
     void DebugHover(int row, int btn) { hover = true; hoverRow = row; hoverBtn = btn; Render(); }
     void OnMenuLive(int id, float v);
     void TestTypeItem(int index, const wchar_t* text);
@@ -89,7 +97,6 @@ public:
 
     static const int NotEditing = -1, TitleIndex = -2;
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-    static LRESULT CALLBACK EditHostProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK PreviewProc(HWND, UINT, WPARAM, LPARAM);
 
 private:
@@ -98,16 +105,37 @@ private:
 
     // 编辑
     int editIndex = NotEditing;
-    Str editOrig;
-    HWND editHost = nullptr, editCtl = nullptr;
-    HFONT editFont = nullptr;
-    HBRUSH editBrush = nullptr;
-    float editHeightDip = 0;
-    void OpenEditor();
-    void CloseEditor();
-    void PositionEditor();
-    void OnEditKey(WPARAM vk, bool* handled);
-    friend LRESULT CALLBACK EditSubclass(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+    Str editOrig, editText;           // 编辑前 / 正在编辑的文字
+    int caret = 0, anchor = 0;        // 光标和选区另一端（UTF-16 位置）
+    Str compText;                     // 输入法正在组的字
+    int compCursor = 0;
+    bool caretOn = true, editSelecting = false;
+    float editGoalX = -1, editW = 0;  // 上下移动时保持的列；编辑区宽度
+    D2D1_RECT_F editBox = {}, caretBox = {}; // 编辑区、光标（DIP，内容坐标）
+    struct EditSnap { Str text; int caret, anchor; };
+    Vec<EditSnap> editUndo, editRedo; // 编辑中的撤销（提交后整条算一步，进便签的撤销）
+    int editLastKind = 0, editLastPos = 0;
+    IDWriteTextLayout* EditLayout(int* dispCaret);
+    float EditMeasure(float w, float minH);
+    void DrawEditor(ID2D1RenderTarget* rt, float x, float y, float w, float h, bool centerV);
+    int EditHit(float xd, float yd);
+    bool InEditBox(float xd, float yd) const;
+    int EditStep(int pos, int dir, bool word);
+    int EditLineMove(int pos, int what);
+    void EditSetCaret(int pos, bool extend);
+    void EditReplace(int a, int b, const Str& s, int kind);
+    void EditInsert(const Str& s, int kind);
+    void EditUndoRedo(bool redoIt);
+    void EditCopy(bool cut);
+    void EditPaste();
+    void EditSelectWord(int pos);
+    bool EditKey(WPARAM vk);
+    void EditChar(wchar_t c);
+    void EditUpdated();
+    void UpdateImePos();
+    bool EditIme(UINT m, WPARAM w, LPARAM l, LRESULT* r);
+    void EditFinishIme(bool cancel);
+    void EditContextMenu(int sx, int sy);
 
     // 布局（上次绘制的结果，用于命中测试；单位 DIP，内容坐标）
     Vec<RowInfo> rows;
