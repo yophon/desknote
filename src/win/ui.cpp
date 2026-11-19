@@ -1,5 +1,6 @@
 // 自绘界面：系统主题、画布、绘制小工具、仿 Win11 的弹出菜单
 #include "ui.h"
+#include "gfx_d2d.h"
 #include <windowsx.h>
 #include <uxtheme.h>
 
@@ -23,25 +24,29 @@ bool Canvas::Begin(int w, int h, float dpi, bool opaque)
     props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
     props.pixelFormat.alphaMode = opaque ? D2D1_ALPHA_MODE_IGNORE : D2D1_ALPHA_MODE_PREMULTIPLIED;
     props.dpiX = props.dpiY = dpi;
-    HRESULT hr = Gfx::D2D()->CreateDCRenderTarget(&props, &rt);
+    HRESULT hr = Gfx::D2D()->CreateDCRenderTarget(&props, &dc);
     if (FAILED(hr)) { Str m(L"CreateDCRenderTarget 失败 hr="); m.Int((i64)(u32)hr); Log(m); return false; }
     RECT rc = { 0, 0, pw, ph };
-    rt->BindDC(mem, &rc);
-    rt->BeginDraw();
+    dc->BindDC(mem, &rc);
+    dc->BeginDraw();
     D2D1_COLOR_F clear = {};
-    rt->Clear(&clear);
+    dc->Clear(&clear);
+    rt = new Painter();
+    rt->rt = dc;
     return true;
 }
 
 void Canvas::Finish()
 {
-    if (rt)
+    if (dc)
     {
-        HRESULT hr = rt->EndDraw();
+        HRESULT hr = dc->EndDraw();
         if (FAILED(hr)) { Str m(L"EndDraw 失败 hr="); m.Int((i64)(u32)hr); Log(m); }
-        rt->Release();
-        rt = nullptr;
+        dc->Release();
+        dc = nullptr;
     }
+    delete rt;
+    rt = nullptr;
     GdiFlush();
 }
 
@@ -154,11 +159,6 @@ void AllowDarkControls(HWND h)
     SetWindowTheme(h, T.dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
 }
 
-D2D1_COLOR_F C(u32 argb)
-{
-    D2D1_COLOR_F c = { ((argb >> 16) & 255) / 255.f, ((argb >> 8) & 255) / 255.f, (argb & 255) / 255.f, ((argb >> 24) & 255) / 255.f };
-    return c;
-}
 
 u32 Solid(u32 over, u32 base)
 {
@@ -170,230 +170,6 @@ u32 Solid(u32 over, u32 base)
 }
 
 COLORREF Ref(u32 argb) { return RGB((argb >> 16) & 255, (argb >> 8) & 255, argb & 255); }
-
-// =====================================================================
-// 绘制小工具（单位 DIP）
-// =====================================================================
-static ID2D1SolidColorBrush* MakeBrush(ID2D1RenderTarget* rt, u32 argb)
-{
-    ID2D1SolidColorBrush* b = nullptr;
-    D2D1_COLOR_F c = C(argb);
-    rt->CreateSolidColorBrush(&c, nullptr, &b);
-    return b;
-}
-
-void Fill(ID2D1RenderTarget* rt, D2D1_RECT_F r, float radius, u32 argb)
-{
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (!b) return;
-    if (radius > 0) rt->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), b);
-    else rt->FillRectangle(&r, b);
-    b->Release();
-}
-
-void FillCorners(ID2D1RenderTarget* rt, D2D1_RECT_F r, float tl, float tr, float br, float bl, u32 argb)
-{
-    ID2D1PathGeometry* g = nullptr;
-    ID2D1GeometrySink* s = nullptr;
-    Gfx::D2D()->CreatePathGeometry(&g);
-    if (!g) return;
-    g->Open(&s);
-    s->BeginFigure(D2D1::Point2F(r.left + tl, r.top), D2D1_FIGURE_BEGIN_FILLED);
-    s->AddLine(D2D1::Point2F(r.right - tr, r.top));
-    if (tr > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right, r.top + tr), D2D1::SizeF(tr, tr), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->AddLine(D2D1::Point2F(r.right, r.bottom - br));
-    if (br > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right - br, r.bottom), D2D1::SizeF(br, br), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->AddLine(D2D1::Point2F(r.left + bl, r.bottom));
-    if (bl > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left, r.bottom - bl), D2D1::SizeF(bl, bl), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->AddLine(D2D1::Point2F(r.left, r.top + tl));
-    if (tl > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left + tl, r.top), D2D1::SizeF(tl, tl), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->EndFigure(D2D1_FIGURE_END_CLOSED);
-    s->Close();
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (b) { rt->FillGeometry(g, b); b->Release(); }
-    s->Release();
-    g->Release();
-}
-
-void Stroke(ID2D1RenderTarget* rt, D2D1_RECT_F r, float radius, u32 argb, float width)
-{
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (!b) return;
-    float h = width / 2;
-    D2D1_RECT_F in = { r.left + h, r.top + h, r.right - h, r.bottom - h };
-    if (radius > 0) rt->DrawRoundedRectangle(D2D1::RoundedRect(in, Max(0.f, radius - h), Max(0.f, radius - h)), b, width);
-    else rt->DrawRectangle(&in, b, width);
-    b->Release();
-}
-
-void Circle(ID2D1RenderTarget* rt, float cx, float cy, float radius, u32 argb)
-{
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (!b) return;
-    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius), b);
-    b->Release();
-}
-
-void Ring(ID2D1RenderTarget* rt, float cx, float cy, float radius, u32 argb, float width)
-{
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (!b) return;
-    rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius), b, width);
-    b->Release();
-}
-
-void Line(ID2D1RenderTarget* rt, float x0, float y0, float x1, float y1, u32 argb, float width)
-{
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (!b) return;
-    rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), b, width);
-    b->Release();
-}
-
-// 用一圈圈逐渐放大的半透明圆角矩形叠出柔和阴影（软件渲染没有模糊特效可用）
-void Shadow(ID2D1RenderTarget* rt, D2D1_RECT_F r, float radius, int layers, float alpha, float dy)
-{
-    ID2D1SolidColorBrush* b = MakeBrush(rt, 0xFF000000);
-    if (!b) return;
-    b->SetOpacity(alpha);
-    for (int k = layers; k >= 1; k--)
-    {
-        D2D1_RECT_F e = { r.left - k, r.top - k + dy, r.right + k, r.bottom + k + dy };
-        rt->FillRoundedRectangle(D2D1::RoundedRect(e, radius + k, radius + k), b);
-    }
-    b->Release();
-}
-
-// 字体：Segoe UI Variable（Win11 的界面字体），中文由系统回退到微软雅黑；没有就用 Segoe UI
-static const wchar_t* UiFamily()
-{
-    static int has = -1;
-    if (has < 0)
-    {
-        has = 0;
-        IDWriteFontCollection* fc = nullptr;
-        if (SUCCEEDED(Gfx::DW()->GetSystemFontCollection(&fc, FALSE)) && fc)
-        {
-            UINT32 idx;
-            BOOL exists = FALSE;
-            fc->FindFamilyName(L"Segoe UI Variable Text", &idx, &exists);
-            has = exists ? 1 : 0;
-            fc->Release();
-        }
-    }
-    return has ? L"Segoe UI Variable Text" : L"Segoe UI";
-}
-
-static IDWriteTextFormat* Format(float size, int weight, bool wrap)
-{
-    IDWriteTextFormat* f = nullptr;
-    Gfx::DW()->CreateTextFormat(UiFamily(), nullptr, (DWRITE_FONT_WEIGHT)weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                size, L"zh-cn", &f);
-    if (!f) return nullptr;
-    float lh = (float)(int)(size * 1.43f + 0.5f);
-    f->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, lh, lh * 0.76f);
-    if (!wrap)
-    {
-        f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        IDWriteInlineObject* sign = nullptr;
-        Gfx::DW()->CreateEllipsisTrimmingSign(f, &sign);
-        DWRITE_TRIMMING trim = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
-        f->SetTrimming(&trim, sign);
-        SafeRelease(sign);
-    }
-    return f;
-}
-
-static IDWriteTextLayout* Layout(const Str& s, float size, int weight, bool wrap, float w)
-{
-    IDWriteTextFormat* f = Format(size, weight, wrap);
-    if (!f) return nullptr;
-    IDWriteTextLayout* l = nullptr;
-    Gfx::DW()->CreateTextLayout(s.c(), s.n, f, Max(w, 1.f), 100000.f, &l);
-    f->Release();
-    return l;
-}
-
-float Text(ID2D1RenderTarget* rt, const Str& s, D2D1_RECT_F r, float size, int weight, u32 argb, int align)
-{
-    if (!s.n) return 0;
-    IDWriteTextLayout* l = Layout(s, size, weight, false, r.right - r.left);
-    if (!l) return 0;
-    DWRITE_TEXT_METRICS m = {};
-    l->GetMetrics(&m);
-    if (align == Center) l->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    else if (align == Right) l->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (b)
-    {
-        float y = r.top + ((r.bottom - r.top) - m.height) / 2;
-        rt->DrawTextLayout(D2D1::Point2F(r.left, y), l, b, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-        b->Release();
-    }
-    l->Release();
-    return Min(m.widthIncludingTrailingWhitespace, r.right - r.left);
-}
-
-float TextWrap(ID2D1RenderTarget* rt, const Str& s, float x, float y, float w, float size, int weight, u32 argb)
-{
-    if (!s.n) return 0;
-    IDWriteTextLayout* l = Layout(s, size, weight, true, w);
-    if (!l) return 0;
-    DWRITE_TEXT_METRICS m = {};
-    l->GetMetrics(&m);
-    if (rt)
-    {
-        ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-        if (b) { rt->DrawTextLayout(D2D1::Point2F(x, y), l, b, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT); b->Release(); }
-    }
-    l->Release();
-    return m.height;
-}
-
-float Measure(const Str& s, float size, int weight)
-{
-    if (!s.n) return 0;
-    IDWriteTextLayout* l = Layout(s, size, weight, false, 100000.f);
-    if (!l) return 0;
-    DWRITE_TEXT_METRICS m = {};
-    l->GetMetrics(&m);
-    l->Release();
-    return m.widthIncludingTrailingWhitespace;
-}
-
-float MeasureWrap(const Str& s, float w, float size, int weight) { return TextWrap(nullptr, s, 0, 0, w, size, weight, 0); }
-
-void Icon(ID2D1RenderTarget* rt, wchar_t glyph, float cx, float cy, float size, u32 argb)
-{
-    static int fluent = -1;
-    if (fluent < 0)
-    {
-        fluent = 0;
-        IDWriteFontCollection* fc = nullptr;
-        if (SUCCEEDED(Gfx::DW()->GetSystemFontCollection(&fc, FALSE)) && fc)
-        {
-            UINT32 idx;
-            BOOL exists = FALSE;
-            fc->FindFamilyName(L"Segoe Fluent Icons", &idx, &exists);
-            fluent = exists ? 1 : 0;
-            fc->Release();
-        }
-    }
-    IDWriteTextFormat* f = nullptr;
-    Gfx::DW()->CreateTextFormat(fluent ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"", &f);
-    if (!f) return;
-    f->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    ID2D1SolidColorBrush* b = MakeBrush(rt, argb);
-    if (b)
-    {
-        D2D1_RECT_F r = { cx - size, cy - size, cx + size, cy + size };
-        rt->DrawTextW(&glyph, 1, f, &r, b, D2D1_DRAW_TEXT_OPTIONS_NONE);
-        b->Release();
-    }
-    f->Release();
-}
 
 // =====================================================================
 // 菜单数据
@@ -593,31 +369,31 @@ static void LayoutLevel(MenuLevel* lv)
     lv->h = y + Pad;
 }
 
-static D2D1_RECT_F RowRect(MenuLevel* lv, int i)
+static RectF RowRect(MenuLevel* lv, int i)
 {
-    return D2D1::RectF(Margin + Inset, Margin + lv->tops[i], Margin + lv->w - Inset, Margin + lv->tops[i] + lv->heights[i]);
+    return RectF(Margin + Inset, Margin + lv->tops[i], Margin + lv->w - Inset, Margin + lv->tops[i] + lv->heights[i]);
 }
 
 // 色块 / 分段按钮的位置
 static float SwatchCx(MenuLevel* lv, int part) { (void)lv; return Margin + Inset + 12 + SwD / 2 + part * (SwD + SwGap); }
-static void SegRects(MenuLevel* lv, const MenuItem& it, int i, D2D1_RECT_F* box, D2D1_RECT_F* seg)
+static void SegRects(MenuLevel* lv, const MenuItem& it, int i, RectF* box, RectF* seg)
 {
-    D2D1_RECT_F r = RowRect(lv, i);
+    RectF r = RowRect(lv, i);
     float total = SegWidth(it);
     float right = r.right - 12;
-    *box = D2D1::RectF(right - total, r.top + 8, right, r.bottom - 8);
+    *box = RectF(right - total, r.top + 8, right, r.bottom - 8);
     float x = box->left;
     for (int k = 0; k <= it.count && seg; k++)
     {
         if (k == it.count) break;
         float sw = Max(44.f, Measure(Str(it.labels[k]), 13, 400) + 20);
-        seg[k] = D2D1::RectF(x, box->top, x + sw, box->bottom);
+        seg[k] = RectF(x, box->top, x + sw, box->bottom);
         x += sw;
     }
 }
 static void SliderTrack(MenuLevel* lv, int i, float* x0, float* x1, float* cy)
 {
-    D2D1_RECT_F r = RowRect(lv, i);
+    RectF r = RowRect(lv, i);
     *x0 = r.left + 12 + 64 + 8;
     *x1 = r.right - 12 - 40 - 8;
     *cy = (r.top + r.bottom) / 2;
@@ -630,9 +406,9 @@ static void RenderLevel(MenuLevel* lv)
     int pw = (int)((lv->w + Margin * 2) * S + 0.5f), ph = (int)((lv->h + Margin * 2) * S + 0.5f);
     Canvas c;
     if (!c.Begin(pw, ph, 96 * S)) { c.End(lv->hwnd); return; }
-    ID2D1RenderTarget* rt = c.rt;
-    rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    D2D1_RECT_F box = D2D1::RectF(Margin, Margin, Margin + lv->w, Margin + lv->h);
+    Painter* rt = c.rt;
+    Gfx::GrayscaleText(rt);
+    RectF box = RectF(Margin, Margin, Margin + lv->w, Margin + lv->h);
     Shadow(rt, box, Radius, 12, T.dark ? 0.030f : 0.016f, 3);
     Fill(rt, box, Radius, T.menuBg);
     Stroke(rt, box, Radius, T.menuBorder, 1);
@@ -642,7 +418,7 @@ static void RenderLevel(MenuLevel* lv)
     for (int i = 0; i < m->items.n; i++)
     {
         MenuItem& it = m->items[i];
-        D2D1_RECT_F r = RowRect(lv, i);
+        RectF r = RowRect(lv, i);
         bool hot = lv->hot == i;
         bool pressed = s->pressLevel == levelIndex && s->pressItem == i;
         switch (it.kind)
@@ -651,7 +427,7 @@ static void RenderLevel(MenuLevel* lv)
             Line(rt, Margin, (r.top + r.bottom) / 2, Margin + lv->w, (r.top + r.bottom) / 2, T.divider, 1);
             break;
         case MkHeader:
-            Text(rt, it.text, D2D1::RectF(r.left + 12, r.top + 8, r.right - 12, r.bottom - 2), 12, 400, T.text2);
+            Text(rt, it.text, RectF(r.left + 12, r.top + 8, r.right - 12, r.bottom - 2), 12, 400, T.text2);
             break;
         case MkItem:
         {
@@ -669,7 +445,7 @@ static void RenderLevel(MenuLevel* lv)
                 // 菜单里不关菜单的开关：画成右侧的拨动开关，文字和滑块那几行对齐
                 textX = r.left + 12;
                 float cy = (r.top + r.bottom) / 2;
-                D2D1_RECT_F tr = D2D1::RectF(r.right - 12 - 40, cy - 10, r.right - 12, cy + 10);
+                RectF tr = RectF(r.right - 12 - 40, cy - 10, r.right - 12, cy + 10);
                 if (it.check)
                 {
                     Fill(rt, tr, 10, T.accent);
@@ -690,11 +466,11 @@ static void RenderLevel(MenuLevel* lv)
             if (it.hint.n)
             {
                 float hw = Measure(it.hint, 12, 400);
-                Text(rt, it.hint, D2D1::RectF(right - hw - 1, titleTop, right, titleBottom), 12, 400, it.disabled ? T.disabled : T.text2, Right);
+                Text(rt, it.hint, RectF(right - hw - 1, titleTop, right, titleBottom), 12, 400, it.disabled ? T.disabled : T.text2, Right);
                 right -= hw + 24;
             }
-            Text(rt, it.text, D2D1::RectF(textX, titleTop, right, titleBottom), 14, 400, fg);
-            if (it.desc.n) Text(rt, it.desc, D2D1::RectF(textX, titleBottom, it.live && it.checkable ? right : r.right - 12, titleBottom + 16), 12, 400, it.disabled ? T.disabled : T.text2);
+            Text(rt, it.text, RectF(textX, titleTop, right, titleBottom), 14, 400, fg);
+            if (it.desc.n) Text(rt, it.desc, RectF(textX, titleBottom, it.live && it.checkable ? right : r.right - 12, titleBottom + 16), 12, 400, it.disabled ? T.disabled : T.text2);
             break;
         }
         case MkSwatches:
@@ -728,32 +504,32 @@ static void RenderLevel(MenuLevel* lv)
         }
         case MkSlider:
         {
-            Text(rt, it.text, D2D1::RectF(r.left + 12, r.top, r.left + 12 + 64, r.bottom), 14, 400, T.text);
+            Text(rt, it.text, RectF(r.left + 12, r.top, r.left + 12 + 64, r.bottom), 14, 400, T.text);
             float x0, x1, cy;
             SliderTrack(lv, i, &x0, &x1, &cy);
             float t = (it.val - it.minV) / Max(0.0001f, it.maxV - it.minV);
             float tx = x0 + (x1 - x0) * t;
-            Fill(rt, D2D1::RectF(x0, cy - 2, x1, cy + 2), 2, T.strong);
-            Fill(rt, D2D1::RectF(x0, cy - 2, tx, cy + 2), 2, T.accent);
+            Fill(rt, RectF(x0, cy - 2, x1, cy + 2), 2, T.strong);
+            Fill(rt, RectF(x0, cy - 2, tx, cy + 2), 2, T.accent);
             bool dragging = s->dragLevel == levelIndex && s->dragItem == i;
             Circle(rt, tx, cy, 10, T.knob);
             Ring(rt, tx, cy, 9.5f, T.dark ? 0x18FFFFFF : 0x0F000000, 1);
             Circle(rt, tx, cy, dragging ? 5 : hot ? 7 : 6, T.accent);
             Str v;
             v.Int((int)(it.val + 0.5f)).Append(it.unit);
-            Text(rt, v, D2D1::RectF(r.right - 12 - 40, r.top, r.right - 12, r.bottom), 13, 400, T.text2, Right);
+            Text(rt, v, RectF(r.right - 12 - 40, r.top, r.right - 12, r.bottom), 13, 400, T.text2, Right);
             break;
         }
         case MkSegment:
         {
-            Text(rt, it.text, D2D1::RectF(r.left + 12, r.top, r.left + 12 + 56, r.bottom), 14, 400, T.text);
-            D2D1_RECT_F bx, seg[8];
+            Text(rt, it.text, RectF(r.left + 12, r.top, r.left + 12 + 56, r.bottom), 14, 400, T.text);
+            RectF bx, seg[8];
             SegRects(lv, it, i, &bx, seg);
             Fill(rt, bx, 5, T.ctrlFill);
             Stroke(rt, bx, 5, T.ctrlBorder, 1);
             for (int k = 0; k < it.count && k < 8; k++)
             {
-                D2D1_RECT_F sr = { seg[k].left + 2, seg[k].top + 2, seg[k].right - 2, seg[k].bottom - 2 };
+                RectF sr = { seg[k].left + 2, seg[k].top + 2, seg[k].right - 2, seg[k].bottom - 2 };
                 if (it.sel == k) Fill(rt, sr, 4, T.accent);
                 else if (hot && lv->hotPart == k) Fill(rt, sr, 4, T.subtleHover);
                 Text(rt, Str(it.labels[k]), seg[k], 13, it.sel == k ? 600 : 400, it.sel == k ? T.onAccent : T.text, Center);
@@ -856,7 +632,7 @@ static bool HitTest(POINT p, int* level, int* item, int* part)
         *part = -1;
         for (int i = 0; i < lv->m->items.n; i++)
         {
-            D2D1_RECT_F r = RowRect(lv, i);
+            RectF r = RowRect(lv, i);
             if (y < r.top || y >= r.bottom) continue;
             MenuItem& it = lv->m->items[i];
             if (!Selectable(it)) return true;
@@ -868,7 +644,7 @@ static bool HitTest(POINT p, int* level, int* item, int* part)
             }
             if (it.kind == MkSegment)
             {
-                D2D1_RECT_F bx, seg[8];
+                RectF bx, seg[8];
                 SegRects(lv, it, i, &bx, seg);
                 for (int k = 0; k < it.count && k < 8; k++)
                     if (x >= seg[k].left && x < seg[k].right) { *item = i; *part = k; }

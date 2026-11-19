@@ -67,7 +67,7 @@ struct TrashWin
     HWND hwnd = nullptr;
     int dpi = 96;
     float S() const { return dpi / 96.f; }
-    struct Hit { int id; D2D1_RECT_F r; TrashEntry* e; };
+    struct Hit { int id; RectF r; TrashEntry* e; };
     Vec<Hit> hits;            // 列表里的区域是内容坐标（要加滚动），顶栏是窗口坐标
     int hover = 0, press = 0;
     TrashEntry* hoverEntry = nullptr;
@@ -103,7 +103,7 @@ struct TrashWin
     }
 
     // 普通按钮 / 图标按钮
-    void DrawButton(ID2D1RenderTarget* rt, D2D1_RECT_F r, const wchar_t* text, wchar_t icon, bool hot, bool down, bool enabled, bool danger)
+    void DrawButton(Painter* rt, RectF r, const wchar_t* text, wchar_t icon, bool hot, bool down, bool enabled, bool danger)
     {
         const Ui::Theme& T = Ui::T;
         if (text)
@@ -120,7 +120,7 @@ struct TrashWin
         }
     }
 
-    void Build(ID2D1RenderTarget* rt)
+    void Build(Painter* rt)
     {
         hits.Clear();
         const Ui::Theme& T = Ui::T;
@@ -134,12 +134,12 @@ struct TrashWin
         if (list.n) count.Int(list.n).Append(L" 项");
         Str emptyText(L"清空回收站");
         float bw = Ui::Measure(emptyText, 14, 400) + 24;
-        D2D1_RECT_F eb = D2D1::RectF(R - bw, y, R, y + 32);
+        RectF eb = RectF(R - bw, y, R, y + 32);
         if (list.n) { Hit h = { HEmpty, eb, nullptr }; hits.Push(h); }
         if (rt)
         {
-            float tw = Ui::Text(rt, Str(L"回收站"), D2D1::RectF(L, y, R - bw - 16, y + 32), 20, 600, T.text);
-            if (count.n) Ui::Text(rt, count, D2D1::RectF(L + tw + 10, y + 4, R - bw - 16, y + 32), 14, 400, T.text2);
+            float tw = Ui::Text(rt, Str(L"回收站"), RectF(L, y, R - bw - 16, y + 32), 20, 600, T.text);
+            if (count.n) Ui::Text(rt, count, RectF(L + tw + 10, y + 4, R - bw - 16, y + 32), 14, 400, T.text2);
             DrawButton(rt, eb, emptyText.c(), 0, hover == HEmpty, press == HEmpty, list.n > 0, false);
         }
         y += 32 + 6;
@@ -156,16 +156,16 @@ struct TrashWin
             {
                 float cy = listTop + (H - listTop) * 0.4f;
                 Ui::Icon(rt, 0xE7B8, W / 2, cy - 28, 40, T.text3);
-                Ui::Text(rt, Str(L"回收站是空的"), D2D1::RectF(L, cy + 6, R, cy + 30), 14, 400, T.text2, Ui::Center);
-                Ui::Text(rt, Str(L"删除的条目和便签会先放在这里"), D2D1::RectF(L, cy + 30, R, cy + 50), 12, 400, T.text3, Ui::Center);
+                Ui::Text(rt, Str(L"回收站是空的"), RectF(L, cy + 6, R, cy + 30), 14, 400, T.text2, Ui::Center);
+                Ui::Text(rt, Str(L"删除的条目和便签会先放在这里"), RectF(L, cy + 30, R, cy + 50), 12, 400, T.text3, Ui::Center);
             }
             contentH = 0;
             return;
         }
         if (rt)
         {
-            rt->PushAxisAlignedClip(D2D1::RectF(0, listTop, W, H), D2D1_ANTIALIAS_MODE_ALIASED);
-            rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -scroll));
+            Gfx::PushClip(rt, RectF(0, listTop, W, H));
+            Gfx::SetOffset(rt, 0, -scroll);
         }
         float ly = listTop;
         Time lastDay = -1;
@@ -177,16 +177,16 @@ struct TrashWin
             if (day != lastDay)
             {
                 if (lastDay != -1) ly += 14;
-                if (rt) Ui::Text(rt, DayLabel(e->deletedAt), D2D1::RectF(L, ly, R, ly + 20), 14, 600, T.text);
+                if (rt) Ui::Text(rt, DayLabel(e->deletedAt), RectF(L, ly, R, ly + 20), 14, 600, T.text);
                 ly += 20 + 8;
                 lastDay = day;
             }
-            D2D1_RECT_F card = D2D1::RectF(L, ly, R, ly + rowH);
+            RectF card = RectF(L, ly, R, ly + rowH);
             float cy = ly + rowH / 2;
-            D2D1_RECT_F purge = D2D1::RectF(R - 12 - 32, cy - 16, R - 12, cy + 16);
+            RectF purge = RectF(R - 12 - 32, cy - 16, R - 12, cy + 16);
             Str restoreText(L"恢复");
             float rw = Max(72.f, Ui::Measure(restoreText, 14, 400) + 24);
-            D2D1_RECT_F restore = D2D1::RectF(purge.left - 8 - rw, cy - 16, purge.left - 8, cy + 16);
+            RectF restore = RectF(purge.left - 8 - rw, cy - 16, purge.left - 8, cy + 16);
             Hit h1 = { HRow, card, e }, h2 = { HRestore, restore, e }, h3 = { HPurge, purge, e };
             hits.Push(h1); hits.Push(h2); hits.Push(h3);
             // 只画看得见的行
@@ -215,8 +215,8 @@ struct TrashWin
                 sub += L" · ";
                 sub.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute).Append(L" 删除");
                 float textL = L + 16 + 20 + 16, textR = restore.left - 16;
-                Ui::Text(rt, main, D2D1::RectF(textL, cy - 19, textR, cy + 1), 14, 400, T.text);
-                Ui::Text(rt, sub, D2D1::RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
+                Ui::Text(rt, main, RectF(textL, cy - 19, textR, cy + 1), 14, 400, T.text);
+                Ui::Text(rt, sub, RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
                 bool hr = hover == HRestore && hoverEntry == e, hp = hover == HPurge && hoverEntry == e;
                 DrawButton(rt, restore, restoreText.c(), 0, hr, hr && press == HRestore, true, false);
                 DrawButton(rt, purge, nullptr, 0xE74D, hp, hp && press == HPurge, true, true);
@@ -227,14 +227,14 @@ struct TrashWin
         contentH = ly - listTop;
         if (rt)
         {
-            rt->SetTransform(D2D1::Matrix3x2F::Identity());
-            rt->PopAxisAlignedClip();
+            Gfx::SetOffset(rt, 0, 0);
+            Gfx::PopClip(rt);
             float viewH = H - listTop;
             if (contentH > viewH + 1)
             {
                 float th = Max(24.f, viewH * viewH / contentH);
                 float ty = listTop + (viewH - th) * Clamp(scroll / (contentH - viewH), 0.f, 1.f);
-                Ui::Fill(rt, D2D1::RectF(W - 7, ty + 2, W - 4, ty + th - 2), 1.5f, T.text3);
+                Ui::Fill(rt, RectF(W - 7, ty + 2, W - 4, ty + th - 2), 1.5f, T.text3);
             }
         }
     }
@@ -248,8 +248,7 @@ struct TrashWin
         Canvas c;
         if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
         {
-            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
-            c.rt->Clear(&bg);
+            Gfx::Clear(c.rt, Ui::T.winBg);
             Build(c.rt);
         }
         c.EndBlt(dc);
@@ -434,7 +433,7 @@ void TrashWindowRefresh(HWND w)
 // 设置：仿 Win11 设置页（分组标题 + 卡片 + 开关），整页自绘，只有三个输入框用系统控件
 // =====================================================================
 enum { SNone, SAuto, SHkToggle, SHkKeys, SOpenDir, SOpenBackup, SSyncToggle, SSyncSave, SOpenGopan, SLinkRepo, SLinkGopanRepo, SLinkGopanWeb };
-struct HitArea { int id; D2D1_RECT_F r; };
+struct HitArea { int id; RectF r; };
 
 static void ApplyFrameTheme(HWND h)
 {
@@ -451,7 +450,7 @@ struct SettingsWin
     int dpi = 96;
     float S() const { return dpi / 96.f; }
     HWND edits[3] = {};               // 服务器、密钥、文件夹
-    D2D1_RECT_F frames[3] = {};       // 输入框外框（DIP，内容坐标）
+    RectF frames[3] = {};       // 输入框外框（DIP，内容坐标）
     HFONT editFont = nullptr;
     int editH = 0;
     HBRUSH brushRest = nullptr, brushFocus = nullptr;
@@ -512,14 +511,14 @@ struct SettingsWin
     }
 
     // ---- 画控件 ----
-    void Toggle(ID2D1RenderTarget* rt, int id, bool on, bool enabled, float right, float cy)
+    void Toggle(Painter* rt, int id, bool on, bool enabled, float right, float cy)
     {
-        D2D1_RECT_F tr = D2D1::RectF(right - 40, cy - 10, right, cy + 10);
-        if (enabled) { HitArea a = { id, D2D1::RectF(tr.left - 44, cy - 16, tr.right, cy + 16) }; hits.Push(a); }
+        RectF tr = RectF(right - 40, cy - 10, right, cy + 10);
+        if (enabled) { HitArea a = { id, RectF(tr.left - 44, cy - 16, tr.right, cy + 16) }; hits.Push(a); }
         if (!rt) return;
         const Ui::Theme& T = Ui::T;
         bool hot = enabled && hover == id, down = enabled && press == id;
-        Ui::Text(rt, Str(on ? L"开" : L"关"), D2D1::RectF(tr.left - 44, cy - 12, tr.left - 12, cy + 12), 14, 400, enabled ? T.text : T.disabled, Ui::Right);
+        Ui::Text(rt, Str(on ? L"开" : L"关"), RectF(tr.left - 44, cy - 12, tr.left - 12, cy + 12), 14, 400, enabled ? T.text : T.disabled, Ui::Right);
         float kr = down ? 7.f : hot ? 7.f : 6.f;
         if (on)
         {
@@ -534,11 +533,11 @@ struct SettingsWin
         }
     }
 
-    float Button(ID2D1RenderTarget* rt, int id, const wchar_t* text, float right, float cy, bool accent)
+    float Button(Painter* rt, int id, const wchar_t* text, float right, float cy, bool accent)
     {
         Str t(text);
         float w = Max(88.f, Ui::Measure(t, 14, 400) + 24);
-        D2D1_RECT_F r = D2D1::RectF(right - w, cy - 16, right, cy + 16);
+        RectF r = RectF(right - w, cy - 16, right, cy + 16);
         HitArea a = { id, r };
         hits.Push(a);
         if (!rt) return w;
@@ -560,26 +559,26 @@ struct SettingsWin
     }
 
     // 文字链接（强调色，后面跟一个“新窗口打开”的小图标，悬停加下划线）；x 是左边，返回宽度
-    float Link(ID2D1RenderTarget* rt, int id, const wchar_t* text, float x, float cy)
+    float Link(Painter* rt, int id, const wchar_t* text, float x, float cy)
     {
         Str t(text);
         float tw = Ui::Measure(t, 14, 400);
         float w = tw + 6 + 12;
-        D2D1_RECT_F r = D2D1::RectF(x - 4, cy - 14, x + w + 4, cy + 14);
+        RectF r = RectF(x - 4, cy - 14, x + w + 4, cy + 14);
         HitArea a = { id, r };
         hits.Push(a);
         if (!rt) return w;
         const Ui::Theme& T = Ui::T;
         bool hot = hover == id, down = press == id;
         u32 c = down ? (T.accent & 0x00FFFFFF) | 0xA0000000 : hot ? (T.accent & 0x00FFFFFF) | 0xD0000000 : T.accent;
-        Ui::Text(rt, t, D2D1::RectF(x, cy - 12, x + tw + 2, cy + 12), 14, 400, c);
+        Ui::Text(rt, t, RectF(x, cy - 12, x + tw + 2, cy + 12), 14, 400, c);
         Ui::Icon(rt, 0xE8A7, x + tw + 6 + 6, cy, 12, c);
         if (hot) Ui::Line(rt, x, cy + 9.5f, x + tw, cy + 9.5f, c, 1);
         return w;
     }
 
     // 快捷键：一组按键帽 + 编辑按钮；返回占的宽度
-    float HotkeyKeys(ID2D1RenderTarget* rt, float right, float cy, bool enabled)
+    float HotkeyKeys(Painter* rt, float right, float cy, bool enabled)
     {
         const Ui::Theme& T = Ui::T;
         Vec<Str> keys;
@@ -599,7 +598,7 @@ struct SettingsWin
         }
         float x = right;
         // 编辑按钮
-        D2D1_RECT_F pen = D2D1::RectF(x - 32, cy - 16, x, cy + 16);
+        RectF pen = RectF(x - 32, cy - 16, x, cy + 16);
         x -= 32 + 6;
         float widths[8];
         int n = Min(keys.n, 8);
@@ -608,7 +607,7 @@ struct SettingsWin
         Str waiting(L"请按组合键");
         if (recording && !n) total = Ui::Measure(waiting, 12, 400) + 24;
         float left = x - total;
-        if (enabled) { HitArea a = { SHkKeys, D2D1::RectF(left - 4, cy - 18, right, cy + 18) }; hits.Push(a); }
+        if (enabled) { HitArea a = { SHkKeys, RectF(left - 4, cy - 18, right, cy + 18) }; hits.Push(a); }
         if (rt)
         {
             bool hot = enabled && hover == SHkKeys;
@@ -616,14 +615,14 @@ struct SettingsWin
             Ui::Icon(rt, 0xE70F, (pen.left + pen.right) / 2, cy, 14, enabled ? T.text2 : T.disabled);
             if (recording && !n)
             {
-                D2D1_RECT_F r = D2D1::RectF(left, cy - 15, x, cy + 15);
+                RectF r = RectF(left, cy - 15, x, cy + 15);
                 Ui::Stroke(rt, r, 4, T.accent, 1.5f);
                 Ui::Text(rt, waiting, r, 12, 400, T.accent, Ui::Center);
             }
             float kx = left;
             for (int i = 0; i < n; i++)
             {
-                D2D1_RECT_F r = D2D1::RectF(kx, cy - 15, kx + widths[i], cy + 15);
+                RectF r = RectF(kx, cy - 15, kx + widths[i], cy + 15);
                 if (enabled) Ui::Fill(rt, r, 4, T.accent);
                 else { Ui::Fill(rt, r, 4, T.ctrlFill); Ui::Stroke(rt, r, 4, T.ctrlBorder, 1); }
                 Ui::Text(rt, keys[i], r, 12, 600, enabled ? T.onAccent : T.disabled, Ui::Center);
@@ -634,42 +633,42 @@ struct SettingsWin
     }
 
     // 卡片：左边图标，标题 + 说明，右边留 rightW 给控件；below = 下面接着的展开区高度
-    D2D1_RECT_F Card(ID2D1RenderTarget* rt, float& y, wchar_t icon, const Str& title, const Str& desc, u32 descColor, float rightW, bool wrapDesc, float below)
+    RectF Card(Painter* rt, float& y, wchar_t icon, const Str& title, const Str& desc, u32 descColor, float rightW, bool wrapDesc, float below)
     {
         const float L = 24, R = Width - 24;
         float textL = L + 16 + 20 + 16, textR = R - 16 - (rightW > 0 ? rightW + 16 : 0);
         float descH = desc.n ? (wrapDesc ? Ui::MeasureWrap(desc, textR - textL, 12, 400) : 17) : 0;
         float block = 20 + descH;
         float h = Max(68.f, block + 30);
-        D2D1_RECT_F r = D2D1::RectF(L, y, R, y + h);
+        RectF r = RectF(L, y, R, y + h);
         if (rt)
         {
             const Ui::Theme& T = Ui::T;
-            D2D1_RECT_F all = D2D1::RectF(L, y, R, y + h + below);
+            RectF all = RectF(L, y, R, y + h + below);
             Ui::Fill(rt, all, 4, T.cardBg);
             Ui::Stroke(rt, all, 4, T.cardBorder, 1);
             Ui::Icon(rt, icon, L + 16 + 10, y + h / 2, 20, T.text);
             float ty = y + (h - block) / 2;
-            Ui::Text(rt, title, D2D1::RectF(textL, ty, textR, ty + 20), 14, 400, T.text);
+            Ui::Text(rt, title, RectF(textL, ty, textR, ty + 20), 14, 400, T.text);
             if (desc.n)
             {
                 if (wrapDesc) Ui::TextWrap(rt, desc, textL, ty + 20, textR - textL, 12, 400, descColor);
-                else Ui::Text(rt, desc, D2D1::RectF(textL, ty + 20, textR, ty + 20 + descH), 12, 400, descColor);
+                else Ui::Text(rt, desc, RectF(textL, ty + 20, textR, ty + 20 + descH), 12, 400, descColor);
             }
         }
         y += h;
         return r;
     }
 
-    void Section(ID2D1RenderTarget* rt, float& y, const wchar_t* t, bool first)
+    void Section(Painter* rt, float& y, const wchar_t* t, bool first)
     {
         if (!first) y += 24;
-        if (rt) Ui::Text(rt, Str(t), D2D1::RectF(24, y, Width - 24, y + 20), 14, 600, Ui::T.text);
+        if (rt) Ui::Text(rt, Str(t), RectF(24, y, Width - 24, y + 20), 14, 600, Ui::T.text);
         y += 20 + 8;
     }
 
     // 布局并（rt 不为空时）绘制；同时记下可点区域和输入框位置
-    void Build(ID2D1RenderTarget* rt)
+    void Build(Painter* rt)
     {
         hits.Clear();
         const Ui::Theme& T = Ui::T;
@@ -678,7 +677,7 @@ struct SettingsWin
         float y = 16;
 
         Section(rt, y, L"常规", true);
-        D2D1_RECT_F c = Card(rt, y, 0xE7E8, Str(L"开机自动启动"),
+        RectF c = Card(rt, y, 0xE7E8, Str(L"开机自动启动"),
                              Str(g_app->isDefaultDir ? L"移动 exe 后，打开一次新位置的 exe，自启会跟着改过去" : L"用测试数据目录打开时不可用"),
                              T.text2, 84, true, 0);
         Toggle(rt, SAuto, App::IsAutoStart(), g_app->isDefaultDir, R - 16, (c.top + c.bottom) / 2);
@@ -722,7 +721,7 @@ struct SettingsWin
         Toggle(rt, SSyncToggle, s.syncEnabled, true, R - 16, (c.top + c.bottom) / 2);
         if (rt)
         {
-            Ui::FillCorners(rt, D2D1::RectF(L + 1, y, R - 1, y + below - 1), 0, 0, 3, 3, T.cardBg2);
+            Ui::FillCorners(rt, RectF(L + 1, y, R - 1, y + below - 1), 0, 0, 3, 3, T.cardBg2);
             Ui::Line(rt, L + 1, y + 0.5f, R - 1, y + 0.5f, T.cardBorder, 1);
         }
         y += 8;
@@ -730,15 +729,15 @@ struct SettingsWin
         for (int i = 0; i < 3; i++)
         {
             float cy = y + 22;
-            frames[i] = D2D1::RectF(R - 16 - 340, cy - 16, R - 16, cy + 16);
+            frames[i] = RectF(R - 16 - 340, cy - 16, R - 16, cy + 16);
             if (rt)
             {
-                Ui::Text(rt, Str(labels[i]), D2D1::RectF(textL, cy - 12, frames[i].left - 12, cy + 12), 14, 400, T.text);
+                Ui::Text(rt, Str(labels[i]), RectF(textL, cy - 12, frames[i].left - 12, cy + 12), 14, 400, T.text);
                 bool f = GetFocus() == edits[i];
-                D2D1_RECT_F fr = frames[i];
+                RectF fr = frames[i];
                 Ui::Fill(rt, fr, 4, f ? T.inputFocusBg : T.inputBg);
                 Ui::Stroke(rt, fr, 4, T.ctrlBorder, 1);
-                if (f) Ui::Fill(rt, D2D1::RectF(fr.left + 1, fr.bottom - 2, fr.right - 1, fr.bottom), 1, T.accent);
+                if (f) Ui::Fill(rt, RectF(fr.left + 1, fr.bottom - 2, fr.right - 1, fr.bottom), 1, T.accent);
                 else Ui::Line(rt, fr.left + 3, fr.bottom - 0.5f, fr.right - 3, fr.bottom - 0.5f, T.strong, 1);
             }
             y += 44;
@@ -761,7 +760,7 @@ struct SettingsWin
         Card(rt, y, 0xE946, Str(L"DeskNote " APP_VERSION), ver, T.text2, 0, false, linksH);
         if (rt)
         {
-            Ui::FillCorners(rt, D2D1::RectF(L + 1, y, R - 1, y + linksH - 1), 0, 0, 3, 3, T.cardBg2);
+            Ui::FillCorners(rt, RectF(L + 1, y, R - 1, y + linksH - 1), 0, 0, 3, 3, T.cardBg2);
             Ui::Line(rt, L + 1, y + 0.5f, R - 1, y + 0.5f, T.cardBorder, 1);
         }
         y += 8;
@@ -772,7 +771,7 @@ struct SettingsWin
         for (int i = 0; i < 3; i++)
         {
             float cy = y + 18;
-            if (rt) Ui::Text(rt, Str(links[i].label), D2D1::RectF(textL, cy - 12, textL + 120, cy + 12), 14, 400, T.text);
+            if (rt) Ui::Text(rt, Str(links[i].label), RectF(textL, cy - 12, textL + 120, cy + 12), 14, 400, T.text);
             // 网址本身做成链接，靠右
             float w = Ui::Measure(Str(links[i].url), 14, 400) + 6 + 12;
             Link(rt, links[i].id, links[i].url, R - 16 - w, cy);
@@ -796,7 +795,7 @@ struct SettingsWin
         float s = S();
         for (int i = 0; i < 3; i++)
         {
-            D2D1_RECT_F f = frames[i];
+            RectF f = frames[i];
             int x = (int)((f.left + 11) * s), w = (int)((f.right - 11) * s) - x;
             int cy = (int)(((f.top + f.bottom) / 2 - scroll) * s);
             RECT cur;
@@ -816,19 +815,18 @@ struct SettingsWin
         Canvas c;
         if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
         {
-            ID2D1RenderTarget* rt = c.rt;
-            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
-            rt->Clear(&bg);
-            rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -scroll));
+            Painter* rt = c.rt;
+            Gfx::Clear(rt, Ui::T.winBg);
+            Gfx::SetOffset(rt, 0, -scroll);
             Build(rt);
-            rt->SetTransform(D2D1::Matrix3x2F::Identity());
+            Gfx::SetOffset(rt, 0, 0);
             float viewH = rc.bottom / S();
             if (contentH > viewH + 1)
             {
                 // 细滚动条：只是位置指示，用滚轮滚
                 float th = Max(24.f, viewH * viewH / contentH);
                 float ty = (viewH - th) * scroll / (contentH - viewH);
-                Ui::Fill(rt, D2D1::RectF(Width - 7, ty + 2, Width - 4, ty + th - 2), 1.5f, Ui::T.text3);
+                Ui::Fill(rt, RectF(Width - 7, ty + 2, Width - 4, ty + th - 2), 1.5f, Ui::T.text3);
             }
         }
         c.EndBlt(dc);
@@ -841,7 +839,7 @@ struct SettingsWin
         float x = px / S(), y = py / S() + scroll;
         for (int i = hits.n - 1; i >= 0; i--)
         {
-            const D2D1_RECT_F& r = hits[i].r;
+            const RectF& r = hits[i].r;
             if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return hits[i].id;
         }
         return SNone;
@@ -1166,7 +1164,7 @@ static void RunModal(HWND dlg, HWND owner, bool* done)
 // =====================================================================
 // 设置提醒：常用时间一键选；或者自己定日期和时间（自绘，和设置页一个样式）
 // =====================================================================
-static void DrawBtn(ID2D1RenderTarget* rt, D2D1_RECT_F r, const Str& text, wchar_t icon, int kind, bool hot, bool down, u32 under)
+static void DrawBtn(Painter* rt, RectF r, const Str& text, wchar_t icon, int kind, bool hot, bool down, u32 under)
 {
     // kind：0 普通按钮，1 强调色按钮，2 无底色的图标/文字按钮
     const Ui::Theme& T = Ui::T;
@@ -1210,8 +1208,8 @@ struct ReminderWin
     HFONT editFont = nullptr;
     int editH = 0;
     HBRUSH brushRest = nullptr, brushFocus = nullptr;
-    D2D1_RECT_F timeFrame = {}, dateRow = {}, timeRow = {};
-    struct Hit { int id; D2D1_RECT_F r; };
+    RectF timeFrame = {}, dateRow = {}, timeRow = {};
+    struct Hit { int id; RectF r; };
     Vec<Hit> hits;
     int hover = 0, press = 0;
     bool tracking = false;
@@ -1335,9 +1333,9 @@ struct ReminderWin
         return s;
     }
 
-    void Push(int id, D2D1_RECT_F r) { Hit h = { id, r }; hits.Push(h); }
+    void Push(int id, RectF r) { Hit h = { id, r }; hits.Push(h); }
 
-    void Build(ID2D1RenderTarget* rt)
+    void Build(Painter* rt)
     {
         hits.Clear();
         const Ui::Theme& T = Ui::T;
@@ -1350,38 +1348,38 @@ struct ReminderWin
         y += th + 18;
 
         // 快捷选项：两列，每格上面是说法、下面是具体时间
-        if (rt) Ui::Text(rt, Str(L"快速选择"), D2D1::RectF(L, y, R, y + 18), 12, 400, T.text2);
+        if (rt) Ui::Text(rt, Str(L"快速选择"), RectF(L, y, R, y + 18), 12, 400, T.text2);
         y += 18 + 8;
         float qw = (CW - 8) / 2, qh = 52;
         for (int i = 0; i < quickN; i++)
         {
             float x = L + (i % 2) * (qw + 8), qy = y + (i / 2) * (qh + 8);
-            D2D1_RECT_F r = D2D1::RectF(x, qy, x + qw, qy + qh);
+            RectF r = RectF(x, qy, x + qw, qy + qh);
             Push(HQuick + i, r);
             if (!rt) continue;
             bool hot = hover == HQuick + i, down = press == HQuick + i;
             Ui::Fill(rt, r, 6, Ui::Solid(down ? T.ctrlPress : hot ? T.ctrlHover : T.ctrlFill, T.winBg));
             Ui::Stroke(rt, r, 6, hot ? (T.accent & 0x00FFFFFF) | 0x80000000 : T.ctrlBorder, 1);
-            Ui::Text(rt, Str(quickLabel[i]), D2D1::RectF(x + 14, qy + 7, x + qw - 14, qy + 27), 14, 400, T.text);
-            Ui::Text(rt, WhenText(quick[i]), D2D1::RectF(x + 14, qy + 27, x + qw - 14, qy + 45), 12, 400, T.text2);
+            Ui::Text(rt, Str(quickLabel[i]), RectF(x + 14, qy + 7, x + qw - 14, qy + 27), 14, 400, T.text);
+            Ui::Text(rt, WhenText(quick[i]), RectF(x + 14, qy + 27, x + qw - 14, qy + 45), 12, 400, T.text2);
         }
         y += ((quickN + 1) / 2) * (qh + 8) + 10;
 
         // 自定义：日期（前一天 / 后一天）+ 时间（输入框，±15 分钟）
-        if (rt) Ui::Text(rt, Str(L"自定义"), D2D1::RectF(L, y, R, y + 18), 12, 400, T.text2);
+        if (rt) Ui::Text(rt, Str(L"自定义"), RectF(L, y, R, y + 18), 12, 400, T.text2);
         y += 18 + 8;
-        D2D1_RECT_F card = D2D1::RectF(L, y, R, y + 56);
+        RectF card = RectF(L, y, R, y + 56);
         if (rt) { Ui::Fill(rt, card, 6, T.cardBg); Ui::Stroke(rt, card, 6, T.cardBorder, 1); }
         float cy = y + 28;
         // 时间部分在右边
-        D2D1_RECT_F plus = D2D1::RectF(R - 10 - 32, cy - 16, R - 10, cy + 16);
-        timeFrame = D2D1::RectF(plus.left - 4 - 72, cy - 16, plus.left - 4, cy + 16);
-        D2D1_RECT_F minus = D2D1::RectF(timeFrame.left - 4 - 32, cy - 16, timeFrame.left - 4, cy + 16);
-        timeRow = D2D1::RectF(minus.left, card.top, R, card.bottom);
+        RectF plus = RectF(R - 10 - 32, cy - 16, R - 10, cy + 16);
+        timeFrame = RectF(plus.left - 4 - 72, cy - 16, plus.left - 4, cy + 16);
+        RectF minus = RectF(timeFrame.left - 4 - 32, cy - 16, timeFrame.left - 4, cy + 16);
+        timeRow = RectF(minus.left, card.top, R, card.bottom);
         // 日期部分在左边
-        D2D1_RECT_F prev = D2D1::RectF(L + 10, cy - 16, L + 10 + 32, cy + 16);
-        D2D1_RECT_F next = D2D1::RectF(minus.left - 16 - 32, cy - 16, minus.left - 16, cy + 16);
-        dateRow = D2D1::RectF(L, card.top, next.right, card.bottom);
+        RectF prev = RectF(L + 10, cy - 16, L + 10 + 32, cy + 16);
+        RectF next = RectF(minus.left - 16 - 32, cy - 16, minus.left - 16, cy + 16);
+        dateRow = RectF(L, card.top, next.right, card.bottom);
         bool canPrev = day > Today();
         if (canPrev) Push(HPrevDay, prev);
         Push(HNextDay, next);
@@ -1392,13 +1390,13 @@ struct ReminderWin
             if (canPrev) DrawBtn(rt, prev, Str(), 0xE76B, 2, hover == HPrevDay, press == HPrevDay, T.cardBg);
             else Ui::Icon(rt, 0xE76B, (prev.left + prev.right) / 2, cy, 14, T.disabled);
             DrawBtn(rt, next, Str(), 0xE76C, 2, hover == HNextDay, press == HNextDay, T.cardBg);
-            Ui::Text(rt, DayText(day), D2D1::RectF(prev.right + 4, cy - 12, next.left - 4, cy + 12), 14, 400, T.text, Ui::Center);
+            Ui::Text(rt, DayText(day), RectF(prev.right + 4, cy - 12, next.left - 4, cy + 12), 14, 400, T.text, Ui::Center);
             DrawBtn(rt, minus, Str(), 0xE738, 2, hover == HMinus, press == HMinus, T.cardBg);
             DrawBtn(rt, plus, Str(), 0xE710, 2, hover == HPlus, press == HPlus, T.cardBg);
             bool f = GetFocus() == timeEdit;
             Ui::Fill(rt, timeFrame, 4, f ? T.inputFocusBg : T.inputBg);
             Ui::Stroke(rt, timeFrame, 4, T.ctrlBorder, 1);
-            if (f) Ui::Fill(rt, D2D1::RectF(timeFrame.left + 1, timeFrame.bottom - 2, timeFrame.right - 1, timeFrame.bottom), 1, T.accent);
+            if (f) Ui::Fill(rt, RectF(timeFrame.left + 1, timeFrame.bottom - 2, timeFrame.right - 1, timeFrame.bottom), 1, T.accent);
             else Ui::Line(rt, timeFrame.left + 3, timeFrame.bottom - 0.5f, timeFrame.right - 3, timeFrame.bottom - 0.5f, T.strong, 1);
         }
         y += 56 + 8;
@@ -1415,11 +1413,11 @@ struct ReminderWin
 
         // 底部按钮
         float bw = 88;
-        D2D1_RECT_F ok = D2D1::RectF(R - bw, y, R, y + 32), cancel = D2D1::RectF(R - 2 * bw - 8, y, R - bw - 8, y + 32);
+        RectF ok = RectF(R - bw, y, R, y + 32), cancel = RectF(R - 2 * bw - 8, y, R - bw - 8, y + 32);
         if (mins >= 0) Push(HOk, ok);
         Push(HCancel, cancel);
         Str removeText(L"移除提醒");
-        D2D1_RECT_F remove = D2D1::RectF(L - 8, y, L - 8 + Ui::Measure(removeText, 14, 400) + 16, y + 32);
+        RectF remove = RectF(L - 8, y, L - 8 + Ui::Measure(removeText, 14, 400) + 16, y + 32);
         if (hasCurrent) Push(HRemove, remove);
         if (rt)
         {
@@ -1453,8 +1451,7 @@ struct ReminderWin
         Canvas c;
         if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
         {
-            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
-            c.rt->Clear(&bg);
+            Gfx::Clear(c.rt, Ui::T.winBg);
             Build(c.rt);
         }
         c.EndBlt(dc);
@@ -1466,7 +1463,7 @@ struct ReminderWin
         float x = px / S(), y = py / S();
         for (int i = hits.n - 1; i >= 0; i--)
         {
-            const D2D1_RECT_F& r = hits[i].r;
+            const RectF& r = hits[i].r;
             if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return hits[i].id;
         }
         return 0;
@@ -1556,8 +1553,8 @@ struct ReminderWin
             ScreenToClient(h, &p);
             float x = p.x / self->S(), y = p.y / self->S();
             int dir = GET_WHEEL_DELTA_WPARAM(w) > 0 ? 1 : -1;
-            const D2D1_RECT_F& dr = self->dateRow;
-            const D2D1_RECT_F& tr = self->timeRow;
+            const RectF& dr = self->dateRow;
+            const RectF& tr = self->timeRow;
             if (x >= dr.left && x < dr.right && y >= dr.top && y < dr.bottom)
             {
                 if (dir > 0) self->day += TicksPerDay;
@@ -1627,7 +1624,7 @@ int ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time curren
 // =====================================================================
 // 便签管理：所有便签一览；显示 / 隐藏（隐藏只在这台电脑上，不同步）、定位、删除、新建；搜索标题和内容
 // =====================================================================
-static void DrawToggle(ID2D1RenderTarget* rt, D2D1_RECT_F tr, bool on, bool hot)
+static void DrawToggle(Painter* rt, RectF tr, bool on, bool hot)
 {
     const Ui::Theme& T = Ui::T;
     float cy = (tr.top + tr.bottom) / 2;
@@ -1692,8 +1689,8 @@ struct ManageWin
     HFONT font = nullptr;
     int editH = 0;
     HBRUSH brushRest = nullptr, brushFocus = nullptr;
-    D2D1_RECT_F searchFrame = {};
-    struct Hit { int id; D2D1_RECT_F r; NoteWin* w; };
+    RectF searchFrame = {};
+    struct Hit { int id; RectF r; NoteWin* w; };
     Vec<Hit> hits;              // 列表里的区域是内容坐标（要加滚动），顶栏是窗口坐标
     int hover = 0, press = 0;
     NoteWin* hoverNote = nullptr;
@@ -1763,7 +1760,7 @@ struct ManageWin
         }
     }
 
-    void Build(ID2D1RenderTarget* rt)
+    void Build(Painter* rt)
     {
         hits.Clear();
         const Ui::Theme& T = Ui::T;
@@ -1776,29 +1773,29 @@ struct ManageWin
         float y = 18;
         Str newText(L"新建便签"), allText(L"全部显示");
         float nw = Ui::Measure(newText, 14, 400) + 28, aw = Ui::Measure(allText, 14, 400) + 24;
-        D2D1_RECT_F nb = D2D1::RectF(R - nw, y, R, y + 32), ab = D2D1::RectF(nb.left - 8 - aw, y, nb.left - 8, y + 32);
+        RectF nb = RectF(R - nw, y, R, y + 32), ab = RectF(nb.left - 8 - aw, y, nb.left - 8, y + 32);
         Hit h1 = { HNew, nb, nullptr };
         hits.Push(h1);
         if (hiddenN) { Hit h2 = { HShowAll, ab, nullptr }; hits.Push(h2); }
         if (rt)
         {
-            float tw = Ui::Text(rt, Str(L"便签管理"), D2D1::RectF(L, y, (hiddenN ? ab.left : nb.left) - 16, y + 32), 20, 600, T.text);
+            float tw = Ui::Text(rt, Str(L"便签管理"), RectF(L, y, (hiddenN ? ab.left : nb.left) - 16, y + 32), 20, 600, T.text);
             Str count;
             count.Int(g_app->notes.n).Append(L" 张");
             if (hiddenN) { count.Append(L" · "); count.Int(hiddenN).Append(L" 张隐藏"); }
-            Ui::Text(rt, count, D2D1::RectF(L + tw + 10, y + 4, (hiddenN ? ab.left : nb.left) - 16, y + 32), 14, 400, T.text2);
+            Ui::Text(rt, count, RectF(L + tw + 10, y + 4, (hiddenN ? ab.left : nb.left) - 16, y + 32), 14, 400, T.text2);
             DrawBtn(rt, nb, newText, 0, 1, hover == HNew, press == HNew, T.winBg);
             if (hiddenN) DrawBtn(rt, ab, allText, 0, 0, hover == HShowAll, press == HShowAll, T.winBg);
         }
         y += 32 + 14;
         // 搜索框
-        searchFrame = D2D1::RectF(L, y, R, y + 34);
+        searchFrame = RectF(L, y, R, y + 34);
         if (rt)
         {
             bool f = GetFocus() == search;
             Ui::Fill(rt, searchFrame, 4, f ? T.inputFocusBg : T.inputBg);
             Ui::Stroke(rt, searchFrame, 4, T.ctrlBorder, 1);
-            if (f) Ui::Fill(rt, D2D1::RectF(searchFrame.left + 1, searchFrame.bottom - 2, searchFrame.right - 1, searchFrame.bottom), 1, T.accent);
+            if (f) Ui::Fill(rt, RectF(searchFrame.left + 1, searchFrame.bottom - 2, searchFrame.right - 1, searchFrame.bottom), 1, T.accent);
             else Ui::Line(rt, searchFrame.left + 3, searchFrame.bottom - 0.5f, searchFrame.right - 3, searchFrame.bottom - 0.5f, T.strong, 1);
             Ui::Icon(rt, 0xE721, searchFrame.left + 18, (searchFrame.top + searchFrame.bottom) / 2, 14, T.text2);
         }
@@ -1815,15 +1812,15 @@ struct ManageWin
                 float cy = listTop + (H - listTop) * 0.35f;
                 bool none = g_app->notes.n == 0;
                 Ui::Icon(rt, none ? 0xE70B : 0xE721, W / 2, cy - 26, 36, T.text3);
-                Ui::Text(rt, Str(none ? L"还没有便签" : L"没有找到"), D2D1::RectF(L, cy + 4, R, cy + 28), 14, 400, T.text2, Ui::Center);
+                Ui::Text(rt, Str(none ? L"还没有便签" : L"没有找到"), RectF(L, cy + 4, R, cy + 28), 14, 400, T.text2, Ui::Center);
             }
             contentH = 0;
             return;
         }
         if (rt)
         {
-            rt->PushAxisAlignedClip(D2D1::RectF(0, listTop, W, H), D2D1_ANTIALIAS_MODE_ALIASED);
-            rt->SetTransform(D2D1::Matrix3x2F::Translation(0, -scroll));
+            Gfx::PushClip(rt, RectF(0, listTop, W, H));
+            Gfx::SetOffset(rt, 0, -scroll);
         }
         float ly = listTop;
         const float rowH = 64, lineH = 22;
@@ -1836,13 +1833,13 @@ struct ManageWin
             bool open = expanded == w;
             int shown = open ? Min(d->items.n, maxLines) : 0;
             float extra = open ? 8 + Max(1, shown + (d->items.n > maxLines ? 1 : 0)) * lineH + 10 : 0;
-            D2D1_RECT_F card = D2D1::RectF(L, ly, R, ly + rowH + extra);
+            RectF card = RectF(L, ly, R, ly + rowH + extra);
             float cy = ly + rowH / 2;
-            D2D1_RECT_F del = D2D1::RectF(R - 12 - 32, cy - 16, R - 12, cy + 16);
-            D2D1_RECT_F loc = D2D1::RectF(del.left - 4 - 32, cy - 16, del.left - 4, cy + 16);
-            D2D1_RECT_F set = D2D1::RectF(loc.left - 4 - 32, cy - 16, loc.left - 4, cy + 16);
-            D2D1_RECT_F tog = D2D1::RectF(set.left - 14 - 40, cy - 10, set.left - 14, cy + 10);
-            D2D1_RECT_F togHit = D2D1::RectF(tog.left - 40, cy - 16, tog.right + 4, cy + 16);
+            RectF del = RectF(R - 12 - 32, cy - 16, R - 12, cy + 16);
+            RectF loc = RectF(del.left - 4 - 32, cy - 16, del.left - 4, cy + 16);
+            RectF set = RectF(loc.left - 4 - 32, cy - 16, loc.left - 4, cy + 16);
+            RectF tog = RectF(set.left - 14 - 40, cy - 10, set.left - 14, cy + 10);
+            RectF togHit = RectF(tog.left - 40, cy - 16, tog.right + 4, cy + 16);
             Hit hr = { HRow, card, w }, ht = { HToggle, togHit, w }, hd = { HDelete, del, w };
             hits.Push(hr);
             hits.Push(ht);
@@ -1857,12 +1854,12 @@ struct ManageWin
                 Ui::Stroke(rt, card, 4, T.cardBorder, 1);
                 // 色块：便签自己的底色，上面用字色写 Aa
                 float a = hidden ? 0.4f : 1.f;
-                D2D1_RECT_F sw = D2D1::RectF(L + 14, cy - 18, L + 14 + 36, cy + 18);
+                RectF sw = RectF(L + 14, cy - 18, L + 14 + 36, cy + 18);
                 Ui::Fill(rt, sw, 8, Rgb(d->bgColor, a));
                 Ui::Stroke(rt, sw, 8, T.ctrlBorder, 1);
                 Ui::Text(rt, Str(L"Aa"), sw, 13, 600, Rgb(d->textColor, a), Ui::Center);
                 float textL = sw.right + 14, textR = togHit.left - 8;
-                Ui::Text(rt, d->title, D2D1::RectF(textL, cy - 19, textR, cy + 1), 14, hidden ? 400 : 600, hidden ? T.text2 : T.text);
+                Ui::Text(rt, d->title, RectF(textL, cy - 19, textR, cy + 1), 14, hidden ? 400 : 600, hidden ? T.text2 : T.text);
                 int undone = 0;
                 for (int k = 0; k < d->items.n; k++) if (!d->checkboxes || !d->items[k].done) undone++;
                 Str sub;
@@ -1872,8 +1869,8 @@ struct ManageWin
                 sub += d->mode == ModeTopmost ? L"置顶" : d->mode == ModeNormal ? L"普通窗口" : L"置底";
                 if (d->collapsed) sub += L"（胶囊）";
                 if (list[i].hasTime) { sub += L" · "; sub += WhenText(list[i].st); }
-                Ui::Text(rt, sub, D2D1::RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
-                Ui::Text(rt, Str(L"显示"), D2D1::RectF(tog.left - 40, cy - 10, tog.left - 8, cy + 10), 12, 400, T.text2, Ui::Right);
+                Ui::Text(rt, sub, RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
+                Ui::Text(rt, Str(L"显示"), RectF(tog.left - 40, cy - 10, tog.left - 8, cy + 10), 12, 400, T.text2, Ui::Right);
                 DrawToggle(rt, tog, !hidden, hover == HToggle && hoverNote == w);
                 DrawBtn(rt, set, Str(), 0xE713, 2, hover == HSettings && hoverNote == w, press == HSettings && pressNote == w, T.cardBg);
                 if (hidden) Ui::Icon(rt, 0xE81D, (loc.left + loc.right) / 2, cy, 14, T.disabled);
@@ -1888,7 +1885,7 @@ struct ManageWin
                     Ui::Line(rt, L + 14, py - 0.5f, R - 14, py - 0.5f, T.divider, 1);
                     py += 4;
                     if (!d->items.n)
-                        Ui::Text(rt, Str(L"（还没有条目）"), D2D1::RectF(textL, py, R - 16, py + lineH), 13, 400, T.text3);
+                        Ui::Text(rt, Str(L"（还没有条目）"), RectF(textL, py, R - 16, py + lineH), 13, 400, T.text3);
                     for (int k = 0; k < shown; k++)
                     {
                         const NoteItem& it = d->items[k];
@@ -1896,20 +1893,20 @@ struct ManageWin
                         float icy = py + lineH / 2;
                         if (d->checkboxes)
                         {
-                            D2D1_RECT_F cb = D2D1::RectF(textL, icy - 6, textL + 12, icy + 6);
+                            RectF cb = RectF(textL, icy - 6, textL + 12, icy + 6);
                             if (done) { Ui::Fill(rt, cb, 3, T.text3); Ui::Icon(rt, 0xE73E, textL + 6, icy, 9, T.cardBg); }
                             else Ui::Stroke(rt, cb, 3, T.text3, 1.2f);
                         }
                         else Ui::Circle(rt, textL + 6, icy, 2.5f, T.text3);
                         Str t = it.text.Replace(L"\r", L"").Replace(L"\n", L" ");
-                        Ui::Text(rt, t, D2D1::RectF(textL + 20, py, R - 16, py + lineH), 13, 400, done ? T.text3 : T.text);
+                        Ui::Text(rt, t, RectF(textL + 20, py, R - 16, py + lineH), 13, 400, done ? T.text3 : T.text);
                         py += lineH;
                     }
                     if (d->items.n > maxLines)
                     {
                         Str more(L"…还有 ");
                         more.Int(d->items.n - maxLines).Append(L" 条");
-                        Ui::Text(rt, more, D2D1::RectF(textL + 20, py, R - 16, py + lineH), 12, 400, T.text3);
+                        Ui::Text(rt, more, RectF(textL + 20, py, R - 16, py + lineH), 12, 400, T.text3);
                     }
                 }
             }
@@ -1919,14 +1916,14 @@ struct ManageWin
         contentH = ly - listTop;
         if (rt)
         {
-            rt->SetTransform(D2D1::Matrix3x2F::Identity());
-            rt->PopAxisAlignedClip();
+            Gfx::SetOffset(rt, 0, 0);
+            Gfx::PopClip(rt);
             float viewH = H - listTop;
             if (contentH > viewH + 1)
             {
                 float th = Max(24.f, viewH * viewH / contentH);
                 float ty = listTop + (viewH - th) * Clamp(scroll / (contentH - viewH), 0.f, 1.f);
-                Ui::Fill(rt, D2D1::RectF(W - 7, ty + 2, W - 4, ty + th - 2), 1.5f, T.text3);
+                Ui::Fill(rt, RectF(W - 7, ty + 2, W - 4, ty + th - 2), 1.5f, T.text3);
             }
         }
     }
@@ -1952,8 +1949,7 @@ struct ManageWin
         Canvas c;
         if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
         {
-            D2D1_COLOR_F bg = Ui::C(Ui::T.winBg);
-            c.rt->Clear(&bg);
+            Gfx::Clear(c.rt, Ui::T.winBg);
             Build(c.rt);
         }
         c.EndBlt(dc);

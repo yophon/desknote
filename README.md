@@ -23,7 +23,7 @@ Windows 桌面便签：半透明待办清单，可置底在桌面 / 置顶 / 普
 
 C 风格 C++，不带 C 运行库（自己的内存、字符串、JSON），Direct2D + DirectWrite 软件渲染，绘图对象空闲几秒后整体释放。
 
-代码分两层，为以后出 macOS、Linux 版做准备：`src/core` 是跨平台的核心，不引用任何系统头文件；系统相关的都在平台目录里。
+代码分层，为以后出 macOS、Linux 版做准备：`src/core` 是跨平台的核心，不引用任何系统头文件；`src/ui` 是界面层的跨平台接口；系统相关的都在平台目录里。
 
 | 文件 | 内容 |
 |---|---|
@@ -33,6 +33,8 @@ C 风格 C++，不带 C 运行库（自己的内存、字符串、JSON），Dire
 | `src/core/store.*` | 便签、回收站、设置的读写，每日备份 |
 | `src/core/syncengine.*` | 同步引擎：gopan MCP 客户端、同步状态、一轮同步的计算、三方合并、实时推送连接 |
 | `src/core/links.*` | 条目里的链接识别 |
+| `src/ui/gfx.h` | 绘图接口：图形、文字排版、光标和选区的命中测试（界面代码只通过它画东西） |
+| `src/win/gfx_d2d.cpp` | 绘图接口的 Windows 实现（Direct2D + DirectWrite） |
 | `src/win/plat_win.cpp` | 平台层的 Windows 实现（WinHTTP、DPAPI 等）；`crt_win.cpp` 替代 C 运行库 |
 | `src/win/note.cpp` | 便签窗口：绘制、编辑、排序、撤销、胶囊、右键菜单 |
 | `src/win/ui.*` | 自绘界面共用部分：主题、画布、弹出菜单 |

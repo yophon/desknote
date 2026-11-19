@@ -3,8 +3,7 @@
 #include "win.h"
 #include "store.h"
 #include "links.h"
-#include <d2d1.h>
-#include <dwrite.h>
+#include "gfx.h"
 
 namespace Ui { struct Menu; }
 
@@ -17,19 +16,6 @@ namespace Ui { struct Menu; }
 #define WM_APP_TRAY        (WM_APP + 1)
 #define WM_APP_SYNCDONE    (WM_APP + 2)
 #define WM_APP_REMOTECHANGE (WM_APP + 3) // 实时推送：网盘里有改动
-
-// ---------------------------------------------------------------------
-// 绘图资源：Direct2D/DirectWrite 工厂，用时创建，空闲几秒后整体释放（省内存）
-// ---------------------------------------------------------------------
-namespace Gfx
-{
-    ID2D1Factory* D2D();
-    IDWriteFactory* DW();
-    void Touch();          // 刚用过：推迟释放
-    void ReleaseIfIdle();  // 定时器调用
-    void ReleaseAll();
-    D2D1_COLOR_F Color(u32 rgb, float a);
-}
 
 // ---------------------------------------------------------------------
 // 便签窗口
@@ -119,13 +105,13 @@ private:
     int compCursor = 0;
     bool caretOn = true, editSelecting = false;
     float editGoalX = -1, editW = 0;  // 上下移动时保持的列；编辑区宽度
-    D2D1_RECT_F editBox = {}, caretBox = {}; // 编辑区、光标（DIP，内容坐标）
+    RectF editBox, caretBox; // 编辑区、光标（DIP，内容坐标）
     struct EditSnap { Str text; int caret, anchor; };
     Vec<EditSnap> editUndo, editRedo; // 编辑中的撤销（提交后整条算一步，进便签的撤销）
     int editLastKind = 0, editLastPos = 0;
-    IDWriteTextLayout* EditLayout(int* dispCaret);
+    TextLayout* EditLayout(int* dispCaret);
     float EditMeasure(float w, float minH);
-    void DrawEditor(ID2D1RenderTarget* rt, float x, float y, float w, float h, bool centerV);
+    void DrawEditor(Painter* rt, float x, float y, float w, float h, bool centerV);
     int EditHit(float xd, float yd);
     bool InEditBox(float xd, float yd) const;
     int EditStep(int pos, int dir, bool word);
@@ -148,7 +134,7 @@ private:
     // 布局（上次绘制的结果，用于命中测试；单位 DIP，内容坐标）
     Vec<RowInfo> rows;
     float titleBottom = 0, contentHeight = 0, scrollY = 0;
-    D2D1_RECT_F toolBtn[3] = {};   // 标题栏右侧：新增、菜单、折叠（悬停时出现）
+    RectF toolBtn[3];   // 标题栏右侧：新增、菜单、折叠（悬停时出现）
     int hoverBtn = 0, hoverRow = -1;
     bool hover = false;
     int HitToolbar(float xDip, float yDip) const;

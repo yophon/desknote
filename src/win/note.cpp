@@ -7,78 +7,25 @@
 #include <imm.h>
 
 // =====================================================================
-// 绘图资源
+// 便签正文的排版（gfx.h 的 FontNote；固定行高时基线在 0.78 处）
 // =====================================================================
-namespace Gfx
+struct NoteFont { float size; int weight; bool wrap; };
+static NoteFont MakeFormat(float size, int weight, bool wrap) { NoteFont f = { size, weight, wrap }; return f; }
+
+static TextLayout* MakeLayout(const Str& text, NoteFont nf, float maxW, float lineH)
 {
-    static ID2D1Factory* d2d;
-    static IDWriteFactory* dw;
-    static DWORD lastUse;
-    ID2D1Factory* D2D()
-    {
-        if (!d2d) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), nullptr, (void**)&d2d);
-        lastUse = GetTickCount();
-        return d2d;
-    }
-    IDWriteFactory* DW()
-    {
-        // 独立工厂：字体缓存归它自己，释放工厂时一起释放（共享工厂的缓存会一直留在进程里）
-        if (!dw) DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED, __uuidof(IDWriteFactory), (IUnknown**)&dw);
-        lastUse = GetTickCount();
-        return dw;
-    }
-    void Touch() { lastUse = GetTickCount(); }
-    void ReleaseAll()
-    {
-        if (dw) { dw->Release(); dw = nullptr; }
-        if (d2d) { d2d->Release(); d2d = nullptr; }
-        HeapCompact(GetProcessHeap(), 0);
-    }
-    void ReleaseIfIdle() { if ((d2d || dw) && GetTickCount() - lastUse > 3000) ReleaseAll(); }
-    D2D1_COLOR_F Color(u32 rgb, float a)
-    {
-        D2D1_COLOR_F c = { ((rgb >> 16) & 255) / 255.f, ((rgb >> 8) & 255) / 255.f, (rgb & 255) / 255.f, a };
-        return c;
-    }
+    TextFmt f;
+    f.font = FontNote;
+    f.size = nf.size;
+    f.weight = nf.weight;
+    f.wrap = nf.wrap;
+    f.lineH = lineH;
+    f.baseline = 0.78f;
+    return Gfx::Layout(text, f, maxW);
 }
 
-static IDWriteTextFormat* MakeFormat(float size, int weight, bool wrap)
-{
-    IDWriteTextFormat* f = nullptr;
-    Gfx::DW()->CreateTextFormat(L"Microsoft YaHei UI", nullptr, (DWRITE_FONT_WEIGHT)weight, DWRITE_FONT_STYLE_NORMAL,
-                                DWRITE_FONT_STRETCH_NORMAL, size, L"zh-cn", &f);
-    if (f && !wrap)
-    {
-        f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        IDWriteInlineObject* sign = nullptr;
-        Gfx::DW()->CreateEllipsisTrimmingSign(f, &sign);
-        DWRITE_TRIMMING trim = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
-        f->SetTrimming(&trim, sign);
-        SafeRelease(sign);
-    }
-    return f;
-}
-
-static IDWriteTextLayout* MakeLayout(const Str& text, IDWriteTextFormat* f, float maxW, float lineH)
-{
-    IDWriteTextLayout* l = nullptr;
-    Gfx::DW()->CreateTextLayout(text.c(), text.n, f, Max(maxW, 1.f), 100000.f, &l);
-    if (l && lineH > 0) l->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, lineH, lineH * 0.78f);
-    return l;
-}
-
-static float LayoutHeight(IDWriteTextLayout* l)
-{
-    DWRITE_TEXT_METRICS m = {};
-    l->GetMetrics(&m);
-    return m.height;
-}
-static float LayoutWidth(IDWriteTextLayout* l)
-{
-    DWRITE_TEXT_METRICS m = {};
-    l->GetMetrics(&m);
-    return m.widthIncludingTrailingWhitespace;
-}
+static float LayoutHeight(TextLayout* l) { return Gfx::Height(l); }
+static float LayoutWidth(TextLayout* l) { return Gfx::Width(l); }
 
 static float R1(float v) { return (float)(int)(v * 10 + 0.5f) / 10; }
 static float R0(float v) { return (float)(int)(v + 0.5f); }
@@ -125,58 +72,30 @@ static Str ItemDisplay(const NoteItem& it, int* tagStart)
 }
 
 // withTag：把提醒时间接在文字后面（悬停预览用；便签本身画成右侧的标签）
-static IDWriteTextLayout* ItemLayout(const NoteData* d, const NoteItem& it, IDWriteTextFormat* f, float width, ID2D1Brush* tagBrush, bool withTag)
+static TextLayout* ItemLayout(const NoteData* d, const NoteItem& it, NoteFont f, float width, bool withTag)
 {
     int tag = -1;
     Str s = withTag ? ItemDisplay(it, &tag) : it.text;
-    IDWriteTextLayout* l = MakeLayout(s, f, width, LineH(d));
+    TextLayout* l = MakeLayout(s, f, width, LineH(d));
     if (!l) return nullptr;
     Vec<LinkSpan> links;
     FindLinks(it.text, links);
-    for (int i = 0; i < links.n; i++) l->SetUnderline(TRUE, { (UINT32)links[i].start, (UINT32)links[i].len });
-    if (d->checkboxes && it.done) l->SetStrikethrough(TRUE, { 0, (UINT32)it.text.n });
-    if (tag >= 0)
-    {
-        DWRITE_TEXT_RANGE r = { (UINT32)tag, (UINT32)(s.n - tag) };
-        l->SetFontSize(R1((float)d->fontSize * 0.85f), r);
-        if (tagBrush) l->SetDrawingEffect(tagBrush, r);
-    }
+    for (int i = 0; i < links.n; i++) Gfx::SetUnderline(l, links[i].start, links[i].len);
+    if (d->checkboxes && it.done) Gfx::SetStrike(l, 0, it.text.n);
+    if (tag >= 0) Gfx::SetSize(l, tag, s.n - tag, R1((float)d->fontSize * 0.85f));
     return l;
 }
 
-// 每个角半径可以不同的圆角矩形（胶囊贴边的一侧是直角）
-static void FillCornerRect(ID2D1RenderTarget* rt, D2D1_RECT_F r, float tl, float tr, float br, float bl, ID2D1Brush* b)
-{
-    ID2D1PathGeometry* g = nullptr;
-    ID2D1GeometrySink* s = nullptr;
-    Gfx::D2D()->CreatePathGeometry(&g);
-    if (!g) return;
-    g->Open(&s);
-    s->BeginFigure(D2D1::Point2F(r.left + tl, r.top), D2D1_FIGURE_BEGIN_FILLED);
-    s->AddLine(D2D1::Point2F(r.right - tr, r.top));
-    if (tr > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right, r.top + tr), D2D1::SizeF(tr, tr), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->AddLine(D2D1::Point2F(r.right, r.bottom - br));
-    if (br > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right - br, r.bottom), D2D1::SizeF(br, br), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->AddLine(D2D1::Point2F(r.left + bl, r.bottom));
-    if (bl > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left, r.bottom - bl), D2D1::SizeF(bl, bl), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->AddLine(D2D1::Point2F(r.left, r.top + tl));
-    if (tl > 0) s->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left + tl, r.top), D2D1::SizeF(tl, tl), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-    s->EndFigure(D2D1_FIGURE_END_CLOSED);
-    s->Close();
-    rt->FillGeometry(g, b);
-    s->Release();
-    g->Release();
-}
-
 // 文字（可选阴影）
-static void DrawLayout(ID2D1RenderTarget* rt, float x, float y, IDWriteTextLayout* l, ID2D1Brush* b, bool shadow, ID2D1Brush* shadowBrush)
+static const u32 TextShadow = 0xBF000000; // 黑色，不透明度 0.75
+static void DrawLayout(Painter* rt, float x, float y, TextLayout* l, u32 color, bool shadow)
 {
-    if (shadow && shadowBrush)
+    if (shadow)
     {
-        rt->DrawTextLayout(D2D1::Point2F(x + 1, y + 1), l, shadowBrush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-        rt->DrawTextLayout(D2D1::Point2F(x + 0.5f, y + 0.5f), l, shadowBrush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        Gfx::Draw(rt, l, x + 1, y + 1, TextShadow);
+        Gfx::Draw(rt, l, x + 0.5f, y + 0.5f, TextShadow);
     }
-    rt->DrawTextLayout(D2D1::Point2F(x, y), l, b, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    Gfx::Draw(rt, l, x, y, color);
 }
 
 // =====================================================================
@@ -250,7 +169,6 @@ void NoteWin::Destroy()
 // =====================================================================
 // 绘制
 // =====================================================================
-static u32 Argb(u32 rgb, float a) { return ((u32)(Clamp(a, 0.f, 1.f) * 255 + 0.5f) << 24) | (rgb & 0xFFFFFF); }
 
 // 提醒标签：条目右侧的小圆角标签（🔔 15:00），到点后变红
 static bool IsDue(const NoteItem& it) { return it.hasRemind && it.reminded && !it.done; }
@@ -268,22 +186,22 @@ static float ItemTextWidth(const NoteData* d, const NoteItem& it, float avail)
     float cw = ChipWidth(d, it);
     return cw > 0 ? Max(40.f, avail - cw - 8) : avail;
 }
-static void DrawChip(ID2D1RenderTarget* rt, const NoteData* d, const NoteItem& it, float x, float y, float alpha)
+static void DrawChip(Painter* rt, const NoteData* d, const NoteItem& it, float x, float y, float alpha)
 {
     float f = ChipFont(d), h = ChipH(d), w = ChipWidth(d, it);
     bool due = IsDue(it);
     u32 c = due ? DueColor : d->textColor;
-    Ui::Fill(rt, D2D1::RectF(x, y, x + w, y + h), h / 2, Argb(c, (due ? 0.22f : 0.12f) * alpha));
+    Ui::Fill(rt, RectF(x, y, x + w, y + h), h / 2, Argb(c, (due ? 0.22f : 0.12f) * alpha));
     Ui::Icon(rt, 0xEA8F, x + 8 + f / 2, y + h / 2, f, Argb(c, (due ? 1.f : 0.8f) * alpha));
-    Ui::Text(rt, FormatWhen(it.remind), D2D1::RectF(x + 8 + f + 4, y, x + w - 4, y + h), f, due ? 600 : 400, Argb(c, (due ? 1.f : 0.8f) * alpha));
+    Ui::Text(rt, FormatWhen(it.remind), RectF(x + 8 + f + 4, y, x + w - 4, y + h), f, due ? 600 : 400, Argb(c, (due ? 1.f : 0.8f) * alpha));
 }
 
 // 勾选框：圆角方框；勾上后实心，中间一个对勾
-static void DrawCheck(ID2D1RenderTarget* rt, const NoteData* d, float x, float y, float size, bool done, bool hot, float alpha)
+static void DrawCheck(Painter* rt, const NoteData* d, float x, float y, float size, bool done, bool hot, float alpha)
 {
     float r = R1(size * 0.26f);
     float bw = Max(1.25f, R1((float)d->fontSize / 11));
-    D2D1_RECT_F b = D2D1::RectF(x, y, x + size, y + size);
+    RectF b = RectF(x, y, x + size, y + size);
     if (done)
     {
         Ui::Fill(rt, b, r, Argb(d->textColor, 0.8f * alpha));
@@ -315,15 +233,15 @@ void NoteWin::Render()
         // ---- 胶囊：标题 + 未完成条数的小圆标 ----
         float S = Scale();
         float size = Min((float)d->fontSize, 15.f);
-        IDWriteTextFormat* ft = MakeFormat(size, 600, false);
+        NoteFont ft = MakeFormat(size, 600, false);
         int undone = 0;
         for (int i = 0; i < d->items.n; i++) if (!d->checkboxes || !d->items[i].done) undone++;
         Str count;
         count.Int(undone);
-        IDWriteTextLayout* lt = MakeLayout(d->title, ft, 220, 0);
+        TextLayout* lt = MakeLayout(d->title, ft, 220, 0);
         float tw = Min(LayoutWidth(lt), 220.f);
         float th = LayoutHeight(lt);
-        lt->SetMaxWidth(tw + 1);
+        Gfx::SetMaxWidth(lt, tw + 1);
         float cf = R1(size * 0.8f);
         float badgeH = R0(cf * 1.55f), badgeW = Max(badgeH, R0(Ui::Measure(count, cf, 600) + 12));
         float H = R0(Max(th, badgeH) + 12), W = R0(14 + tw + 8 + badgeW + 8);
@@ -331,24 +249,20 @@ void NoteWin::Render()
         if (c.Begin((int)(W * S + 0.99f), (int)(H * S + 0.99f), 96 * S))
         {
             W = c.pw / S; H = c.ph / S;
-            ID2D1SolidColorBrush *bg = nullptr, *fg = nullptr;
-            c.rt->CreateSolidColorBrush(Gfx::Color(d->bgColor, (float)Max(d->opacity, 0.8)), &bg);
-            c.rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 1), &fg);
             const float r = H / 2;
             bool docked = dockL || dockR || dockT || dockB;
-            FillCornerRect(c.rt, D2D1::RectF(0, 0, W, H), dockL || dockT ? 0 : r, dockR || dockT ? 0 : r,
-                           dockR || dockB ? 0 : r, dockL || dockB ? 0 : r, bg);
-            if (!docked) Ui::Stroke(c.rt, D2D1::RectF(0, 0, W, H), r, Argb(d->textColor, 0.14f), 1);
-            if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(c.rt, D2D1::RectF(0, 0, W, H), r, Ui::T.accent, 3);
-            c.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            c.rt->DrawTextLayout(D2D1::Point2F(14, (H - th) / 2), lt, fg, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            D2D1_RECT_F br = D2D1::RectF(W - 8 - badgeW, (H - badgeH) / 2, W - 8, (H + badgeH) / 2);
+            Ui::FillCorners(c.rt, RectF(0, 0, W, H), dockL || dockT ? 0 : r, dockR || dockT ? 0 : r,
+                            dockR || dockB ? 0 : r, dockL || dockB ? 0 : r, Argb(d->bgColor, (float)Max(d->opacity, 0.8)));
+            if (!docked) Ui::Stroke(c.rt, RectF(0, 0, W, H), r, Argb(d->textColor, 0.14f), 1);
+            if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(c.rt, RectF(0, 0, W, H), r, Ui::T.accent, 3);
+            Gfx::GrayscaleText(c.rt);
+            Gfx::Draw(c.rt, lt, 14, (H - th) / 2, Argb(d->textColor, 1), true);
+            RectF br = RectF(W - 8 - badgeW, (H - badgeH) / 2, W - 8, (H + badgeH) / 2);
             Ui::Fill(c.rt, br, badgeH / 2, Argb(d->textColor, 0.16f));
             Ui::Text(c.rt, count, br, cf, 600, Argb(d->textColor, 0.9f), Ui::Center);
-            SafeRelease(bg); SafeRelease(fg);
         }
         c.End(hwnd);
-        SafeRelease(lt); SafeRelease(ft);
+        Gfx::Free(lt);
         if (preview && IsWindowVisible(preview)) RenderPreview();
         return;
     }
@@ -359,62 +273,58 @@ void NoteWin::Render()
     if (c.rt)
     {
         float W = pw / S, H = ph / S;
-        ID2D1RenderTarget* rt = c.rt;
-        rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        ID2D1SolidColorBrush *bg = nullptr, *fg = nullptr, *dim = nullptr, *shadow = nullptr;
-        rt->CreateSolidColorBrush(Gfx::Color(d->bgColor, (float)Max(d->opacity, 1.0 / 255)), &bg);
-        rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 1), &fg);
-        rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 0.55f), &dim);
-        rt->CreateSolidColorBrush(Gfx::Color(0, 0.75f), &shadow);
+        Painter* rt = c.rt;
+        Gfx::GrayscaleText(rt);
+        const u32 fg = Argb(d->textColor, 1), dim = Argb(d->textColor, 0.55f);
         const float radius = 8;
-        rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(0, 0, W, H), radius, radius), bg);
+        Ui::Fill(rt, RectF(0, 0, W, H), radius, Argb(d->bgColor, (float)Max(d->opacity, 1.0 / 255)));
         // 细描边：背景很透明时只在鼠标移上来时出现，平时只剩文字
-        if (d->opacity >= 0.12 || hover) Ui::Stroke(rt, D2D1::RectF(0, 0, W, H), radius, Argb(d->textColor, hover ? 0.18f : 0.1f), 1);
-        if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(rt, D2D1::RectF(0, 0, W, H), radius, Ui::T.accent, 3);
+        if (d->opacity >= 0.12 || hover) Ui::Stroke(rt, RectF(0, 0, W, H), radius, Argb(d->textColor, hover ? 0.18f : 0.1f), 1);
+        if (flashUntil && (GetTickCount() / 200) % 2 == 0) Ui::Stroke(rt, RectF(0, 0, W, H), radius, Ui::T.accent, 3);
 
         bool showUi = hover && editIndex == NotEditing && dragIndex < 0 && !g_app->peeking;
         float left = PadX, right = W - PadX, top = PadTop, bottom = H - PadBottom;
-        rt->PushAxisAlignedClip(D2D1::RectF(0, top - 6, W, bottom), D2D1_ANTIALIAS_MODE_ALIASED);
+        Gfx::PushClip(rt, RectF(0, top - 6, W, bottom));
         float lineH = LineH(d), fs = (float)d->fontSize;
         float y = top - scrollY;
 
         // ---- 标题行：标题 + 悬停时出现的三个按钮 ----
         const float btn = 28, btnGap = 2, tbRight = W - 10;
         float ts = TitleSize(d);
-        IDWriteTextFormat* ft = MakeFormat(ts, 700, false);
+        NoteFont ft = MakeFormat(ts, 700, false);
         float titleRight = showUi ? tbRight - 3 * btn - 2 * btnGap - 8 : right;
-        IDWriteTextLayout* lt = MakeLayout(d->title, ft, titleRight - left, 0);
+        TextLayout* lt = MakeLayout(d->title, ft, titleRight - left, 0);
         float titleH = Max(LayoutHeight(lt), btn);
         if (editIndex == TitleIndex)
         {
             titleH = Max(btn, EditMeasure(right - left, 0));
-            Ui::Fill(rt, D2D1::RectF(left - 8, y - 2, right + 8, y + titleH + 2), 6, Argb(d->textColor, 0.08f));
+            Ui::Fill(rt, RectF(left - 8, y - 2, right + 8, y + titleH + 2), 6, Argb(d->textColor, 0.08f));
             DrawEditor(rt, left, y, right - left, titleH, true);
         }
-        else DrawLayout(rt, left, y + (titleH - LayoutHeight(lt)) / 2, lt, fg, d->shadow, shadow);
+        else DrawLayout(rt, left, y + (titleH - LayoutHeight(lt)) / 2, lt, fg, d->shadow);
         float tcy = y + titleH / 2;
         static const wchar_t glyphs[3] = { 0xE710, 0xE712, 0xE73F };
         for (int k = 0; k < 3; k++)
         {
             float bx = tbRight - (3 - k) * btn - (2 - k) * btnGap;
-            toolBtn[k] = D2D1::RectF(bx, tcy - btn / 2 + scrollY, bx + btn, tcy + btn / 2 + scrollY);
+            toolBtn[k] = RectF(bx, tcy - btn / 2 + scrollY, bx + btn, tcy + btn / 2 + scrollY);
             if (!showUi) continue;
-            D2D1_RECT_F r = D2D1::RectF(bx, tcy - btn / 2, bx + btn, tcy + btn / 2);
+            RectF r = RectF(bx, tcy - btn / 2, bx + btn, tcy + btn / 2);
             if (hoverBtn == k + 1) Ui::Fill(rt, r, 5, Argb(d->textColor, 0.14f));
             Ui::Icon(rt, glyphs[k], bx + btn / 2, tcy, 14, Argb(d->textColor, hoverBtn == k + 1 ? 1.f : 0.75f));
         }
-        SafeRelease(lt); SafeRelease(ft);
+        Gfx::Free(lt);
         y += titleH + TitleGap;
         titleBottom = y + scrollY;
 
-        IDWriteTextFormat* fb = MakeFormat(fs, d->fontWeight, true);
+        NoteFont fb = MakeFormat(fs, d->fontWeight, true);
         rows.Clear();
         if (d->items.n == 0 && editIndex != 0)
         {
-            IDWriteTextLayout* lh = MakeLayout(Str(L"双击新增，右键设置"), fb, right - left, lineH);
-            DrawLayout(rt, left, y, lh, dim, false, nullptr);
+            TextLayout* lh = MakeLayout(Str(L"双击新增，右键设置"), fb, right - left, lineH);
+            DrawLayout(rt, left, y, lh, dim, false);
             y += LayoutHeight(lh);
-            SafeRelease(lh);
+            Gfx::Free(lh);
         }
 
         float gap = RowGap(d);
@@ -428,25 +338,25 @@ void NoteWin::Render()
             float avail = right - textX;
             bool editingRow = i == editIndex;
             bool dimmed = real && d->checkboxes && it->done;
-            IDWriteTextLayout* l = nullptr;
+            TextLayout* l = nullptr;
             float h;
             if (editingRow) h = EditMeasure(avail, lineH);
             else
             {
-                l = ItemLayout(d, *it, fb, ItemTextWidth(d, *it, avail), nullptr, false);
+                l = ItemLayout(d, *it, fb, ItemTextWidth(d, *it, avail), false);
                 h = Max(lineH, LayoutHeight(l));
             }
             // 悬停 / 拖动中的行：淡色底 + 左边距里的拖动手柄
             bool rowHot = real && !editingRow && (i == dragIndex || (showUi && hoverRow == i));
             if (rowHot)
             {
-                Ui::Fill(rt, D2D1::RectF(6, y - gap / 2, W - 6, y + h + gap / 2), 6, Argb(d->textColor, i == dragIndex ? 0.16f : 0.07f));
+                Ui::Fill(rt, RectF(6, y - gap / 2, W - 6, y + h + gap / 2), 6, Argb(d->textColor, i == dragIndex ? 0.16f : 0.07f));
                 float cx = PadX / 2 + 2, cy = y + lineH / 2;
                 for (int r = -1; r <= 1; r++)
                     for (int k = 0; k < 2; k++)
                         Ui::Circle(rt, cx - 2.5f + k * 5, cy + r * 5, 1.3f, Argb(d->textColor, 0.6f));
             }
-            if (editingRow) Ui::Fill(rt, D2D1::RectF(6, y - gap / 2, W - 6, y + h + gap / 2), 6, Argb(d->textColor, 0.08f));
+            if (editingRow) Ui::Fill(rt, RectF(6, y - gap / 2, W - 6, y + h + gap / 2), 6, Argb(d->textColor, 0.08f));
             if (d->checkboxes)
             {
                 float size = CheckSize(d);
@@ -456,11 +366,8 @@ void NoteWin::Render()
             float chipLeft = 0;
             if (l)
             {
-                ID2D1SolidColorBrush* tb = nullptr;
-                rt->CreateSolidColorBrush(Gfx::Color(d->textColor, (dimmed ? 0.45f : 1.f) * rowAlpha), &tb);
-                DrawLayout(rt, textX, y, l, tb, d->shadow && !dimmed, shadow);
-                SafeRelease(tb);
-                SafeRelease(l);
+                DrawLayout(rt, textX, y, l, Argb(d->textColor, (dimmed ? 0.45f : 1.f) * rowAlpha), d->shadow && !dimmed);
+                Gfx::Free(l);
                 if (it->hasRemind)
                 {
                     chipLeft = right - ChipWidth(d, *it);
@@ -471,18 +378,16 @@ void NoteWin::Render()
             rows.Push(ri);
             y += h + gap;
         }
-        SafeRelease(fb);
         contentHeight = y + scrollY - top;
-        rt->PopAxisAlignedClip();
+        Gfx::PopClip(rt);
         // 内容超出时：右边一条细滚动条（鼠标移上来才显示）
         float viewH = bottom - top;
         if (hover && contentHeight > viewH + 1)
         {
             float th = Max(20.f, viewH * viewH / contentHeight);
             float ty = top + (viewH - th) * Clamp(scrollY / (contentHeight - viewH), 0.f, 1.f);
-            Ui::Fill(rt, D2D1::RectF(W - 5, ty, W - 2, ty + th), 1.5f, Argb(d->textColor, 0.35f));
+            Ui::Fill(rt, RectF(W - 5, ty, W - 2, ty + th), 1.5f, Argb(d->textColor, 0.35f));
         }
-        SafeRelease(bg); SafeRelease(fg); SafeRelease(dim); SafeRelease(shadow);
     }
     c.End(hwnd);
 }
@@ -766,18 +671,16 @@ void NoteWin::BeginEdit(int index)
 }
 
 // 正在编辑的文字的排版：输入法组字插在光标处；末尾是换行时补一个零宽字符，光标才能落到新的一行
-IDWriteTextLayout* NoteWin::EditLayout(int* dispCaret)
+TextLayout* NoteWin::EditLayout(int* dispCaret)
 {
     bool title = editIndex == TitleIndex;
     Str s = editText;
     int c = caret;
     if (compText.n) { s = editText.Sub(0, caret) + compText + editText.Sub(caret); c = caret + compCursor; }
     if (s.n && s.p[s.n - 1] == L'\n') s.Ch(0x200B);
-    IDWriteTextFormat* f = title ? MakeFormat(TitleSize(d), 700, true) : MakeFormat((float)d->fontSize, d->fontWeight, true);
-    if (!f) return nullptr;
-    IDWriteTextLayout* l = MakeLayout(s, f, editW, title ? 0 : LineH(d));
-    SafeRelease(f);
-    if (l && compText.n) l->SetUnderline(TRUE, { (UINT32)caret, (UINT32)compText.n });
+    NoteFont f = title ? MakeFormat(TitleSize(d), 700, true) : MakeFormat((float)d->fontSize, d->fontWeight, true);
+    TextLayout* l = MakeLayout(s, f, editW, title ? 0 : LineH(d));
+    if (l && compText.n) Gfx::SetUnderline(l, caret, compText.n);
     if (dispCaret) *dispCaret = c;
     return l;
 }
@@ -785,74 +688,60 @@ IDWriteTextLayout* NoteWin::EditLayout(int* dispCaret)
 float NoteWin::EditMeasure(float w, float minH)
 {
     editW = w;
-    IDWriteTextLayout* l = EditLayout(nullptr);
+    TextLayout* l = EditLayout(nullptr);
     if (!l) return minH;
     float h = Max(minH, LayoutHeight(l));
-    l->Release();
+    Gfx::Free(l);
     return h;
 }
 
 // 画编辑中的文字：选区底色、文字、组字下划线、光标。(x, y) 是窗口坐标（已减去滚动）
-void NoteWin::DrawEditor(ID2D1RenderTarget* rt, float x, float y, float w, float h, bool centerV)
+void NoteWin::DrawEditor(Painter* rt, float x, float y, float w, float h, bool centerV)
 {
     editW = w;
     int dc = 0;
-    IDWriteTextLayout* l = EditLayout(&dc);
+    TextLayout* l = EditLayout(&dc);
     if (!l) return;
     float lh = LayoutHeight(l);
     float ty = centerV ? y + Max(0.f, (h - lh) / 2) : y;
-    editBox = D2D1::RectF(x, ty + scrollY, x + w, ty + scrollY + Max(lh, h - (ty - y)));
+    editBox = RectF(x, ty + scrollY, x + w, ty + scrollY + Max(lh, h - (ty - y)));
     // 选区
     int a = Min(caret, anchor), b = Max(caret, anchor);
     if (b > a && !compText.n)
     {
-        UINT32 cnt = 0;
-        l->HitTestTextRange(a, b - a, x, ty, nullptr, 0, &cnt);
-        if (cnt)
-        {
-            DWRITE_HIT_TEST_METRICS* ms = (DWRITE_HIT_TEST_METRICS*)MemAlloc(sizeof(DWRITE_HIT_TEST_METRICS) * cnt);
-            l->HitTestTextRange(a, b - a, x, ty, ms, cnt, &cnt);
-            for (UINT32 i = 0; i < cnt; i++)
-                Ui::Fill(rt, D2D1::RectF(ms[i].left, ms[i].top, ms[i].left + Max(ms[i].width, 4.f), ms[i].top + ms[i].height), 0,
-                         Argb(d->textColor, 0.3f));
-            MemFree(ms);
-        }
+        Vec<RectF> ms;
+        Gfx::RangeRects(l, a, b - a, ms);
+        for (int i = 0; i < ms.n; i++)
+            Ui::Fill(rt, RectF(x + ms[i].left, ty + ms[i].top, x + ms[i].left + Max(ms[i].W(), 4.f), ty + ms[i].bottom), 0,
+                     Argb(d->textColor, 0.3f));
     }
     // 空的新条目：灰色提示
     if (!editText.n && !compText.n && editIndex != TitleIndex)
     {
-        IDWriteTextFormat* f = MakeFormat((float)d->fontSize, d->fontWeight, true);
-        IDWriteTextLayout* ph = MakeLayout(Str(L"输入内容，Enter 保存，Esc 取消"), f, w, LineH(d));
-        ID2D1SolidColorBrush* pb = nullptr;
-        rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 0.35f), &pb);
-        if (ph && pb) rt->DrawTextLayout(D2D1::Point2F(x, ty), ph, pb);
-        SafeRelease(pb); SafeRelease(ph); SafeRelease(f);
+        NoteFont f = MakeFormat((float)d->fontSize, d->fontWeight, true);
+        TextLayout* ph = MakeLayout(Str(L"输入内容，Enter 保存，Esc 取消"), f, w, LineH(d));
+        if (ph) Gfx::Draw(rt, ph, x, ty, Argb(d->textColor, 0.35f));
+        Gfx::Free(ph);
     }
-    ID2D1SolidColorBrush* tb = nullptr;
-    rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 1), &tb);
-    if (tb) rt->DrawTextLayout(D2D1::Point2F(x, ty), l, tb, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-    SafeRelease(tb);
+    Gfx::Draw(rt, l, x, ty, Argb(d->textColor, 1));
     // 光标位置（输入法候选框、滚动都要用，所以总是算；有选区时不画）
-    DWRITE_HIT_TEST_METRICS m = {};
-    float px = 0, py = 0;
-    l->HitTestTextPosition(dc, FALSE, &px, &py, &m);
-    float ch = m.height > 0 ? m.height : (editIndex == TitleIndex ? TitleSize(d) * 1.3f : LineH(d));
-    caretBox = D2D1::RectF(x + px, ty + py + scrollY, x + px + 1.5f, ty + py + ch + scrollY);
+    Gfx::CaretPos cp = Gfx::Caret(l, dc);
+    float px = cp.x, py = cp.y;
+    float ch = cp.h > 0 ? cp.h : (editIndex == TitleIndex ? TitleSize(d) * 1.3f : LineH(d));
+    caretBox = RectF(x + px, ty + py + scrollY, x + px + 1.5f, ty + py + ch + scrollY);
     if (caretOn && (caret == anchor || compText.n))
-        Ui::Fill(rt, D2D1::RectF(x + px, ty + py, x + px + Max(1.5f, R1(1.5f)), ty + py + ch), 0, Argb(d->textColor, 1));
-    l->Release();
+        Ui::Fill(rt, RectF(x + px, ty + py, x + px + Max(1.5f, R1(1.5f)), ty + py + ch), 0, Argb(d->textColor, 1));
+    Gfx::Free(l);
 }
 
 // 鼠标位置（窗口 DIP）-> 文字里的位置
 int NoteWin::EditHit(float xd, float yd)
 {
-    IDWriteTextLayout* l = EditLayout(nullptr);
+    TextLayout* l = EditLayout(nullptr);
     if (!l) return caret;
-    BOOL trailing = FALSE, inside = FALSE;
-    DWRITE_HIT_TEST_METRICS m = {};
-    l->HitTestPoint(xd - editBox.left, yd + scrollY - editBox.top, &trailing, &inside, &m);
-    l->Release();
-    return Clamp((int)(m.textPosition + (trailing ? m.length : 0)), 0, editText.n);
+    int pos = Gfx::HitPoint(l, xd - editBox.left, yd + scrollY - editBox.top);
+    Gfx::Free(l);
+    return Clamp(pos, 0, editText.n);
 }
 
 bool NoteWin::InEditBox(float xd, float yd) const
@@ -883,30 +772,27 @@ int NoteWin::EditStep(int pos, int dir, bool word)
     }
     Str saveComp = compText;
     compText = Str();
-    IDWriteTextLayout* l = EditLayout(nullptr);
+    TextLayout* l = EditLayout(nullptr);
     compText = saveComp;
     int result = Clamp(pos + dir, 0, n);
     if (l)
     {
-        UINT32 cnt = 0;
-        l->GetClusterMetrics(nullptr, 0, &cnt);
-        if (cnt)
+        Vec<int> cm;
+        Gfx::Clusters(l, cm);
+        if (cm.n)
         {
-            DWRITE_CLUSTER_METRICS* cm = (DWRITE_CLUSTER_METRICS*)MemAlloc(sizeof(DWRITE_CLUSTER_METRICS) * cnt);
-            l->GetClusterMetrics(cm, cnt, &cnt);
             int p = 0, prev = 0;
             result = dir < 0 ? 0 : n;
-            for (UINT32 i = 0; i < cnt; i++)
+            for (int i = 0; i < cm.n; i++)
             {
-                int next = Min(p + (int)cm[i].length, n);
+                int next = Min(p + cm[i], n);
                 if (dir < 0 && next >= pos) { result = p < pos ? p : prev; break; }
                 if (dir > 0 && p >= pos && next > pos) { result = next; break; }
                 prev = p;
                 p = next;
             }
-            MemFree(cm);
         }
-        l->Release();
+        Gfx::Free(l);
     }
     return Clamp(result, 0, n);
 }
@@ -914,17 +800,16 @@ int NoteWin::EditStep(int pos, int dir, bool word)
 // what：0 行首，1 行尾，-1 上一行，+1 下一行（保持同一列）
 int NoteWin::EditLineMove(int pos, int what)
 {
-    IDWriteTextLayout* l = EditLayout(nullptr);
+    TextLayout* l = EditLayout(nullptr);
     if (!l) return pos;
     int n = editText.n, result = pos;
-    UINT32 lc = 0;
-    l->GetLineMetrics(nullptr, 0, &lc);
-    DWRITE_LINE_METRICS* lm = lc ? (DWRITE_LINE_METRICS*)MemAlloc(sizeof(DWRITE_LINE_METRICS) * lc) : nullptr;
-    if (lm) l->GetLineMetrics(lm, lc, &lc);
+    Vec<Gfx::LineInfo> lm;
+    Gfx::Lines(l, lm);
+    int lc = lm.n;
     if (what == 0 || what == 1)
     {
         int start = 0;
-        for (UINT32 i = 0; i < lc; i++)
+        for (int i = 0; i < lc; i++)
         {
             int len = (int)lm[i].length;
             if (pos < start + len || i == lc - 1)
@@ -940,24 +825,14 @@ int NoteWin::EditLineMove(int pos, int what)
     }
     else
     {
-        DWRITE_HIT_TEST_METRICS m = {};
-        float px = 0, py = 0;
-        l->HitTestTextPosition(Min(pos, n), FALSE, &px, &py, &m);
-        if (editGoalX < 0) editGoalX = px;
-        float y = what < 0 ? py - 1 : py + m.height + 1;
-        DWRITE_TEXT_METRICS tm = {};
-        l->GetMetrics(&tm);
+        Gfx::CaretPos cp = Gfx::Caret(l, Min(pos, n));
+        if (editGoalX < 0) editGoalX = cp.x;
+        float y = what < 0 ? cp.y - 1 : cp.y + cp.h + 1;
         if (y < 0) result = 0;
-        else if (y >= tm.height) result = n;
-        else
-        {
-            BOOL tr = FALSE, in = FALSE;
-            l->HitTestPoint(editGoalX, y, &tr, &in, &m);
-            result = (int)(m.textPosition + (tr ? m.length : 0));
-        }
+        else if (y >= LayoutHeight(l)) result = n;
+        else result = Gfx::HitPoint(l, editGoalX, y);
     }
-    MemFree(lm);
-    l->Release();
+    Gfx::Free(l);
     return Clamp(result, 0, n);
 }
 
@@ -1373,18 +1248,17 @@ bool NoteWin::TryOpenLink(int x, int y)
     if (!row) return false;
     RECT rc;
     GetClientRect(hwnd, &rc);
-    IDWriteTextFormat* fb = MakeFormat((float)d->fontSize, d->fontWeight, true);
-    IDWriteTextLayout* l = ItemLayout(d, d->items[idx], fb, ItemTextWidth(d, d->items[idx], rc.right / S - PadX - row->textLeft), nullptr, false);
-    BOOL trailing = FALSE, inside = FALSE;
-    DWRITE_HIT_TEST_METRICS m = {};
-    l->HitTestPoint(xd - row->textLeft, yd + scrollY - row->top, &trailing, &inside, &m);
-    SafeRelease(l);
-    SafeRelease(fb);
+    NoteFont fb = MakeFormat((float)d->fontSize, d->fontWeight, true);
+    TextLayout* l = ItemLayout(d, d->items[idx], fb, ItemTextWidth(d, d->items[idx], rc.right / S - PadX - row->textLeft), false);
+    bool inside = false;
+    int at = 0;
+    Gfx::HitPoint(l, xd - row->textLeft, yd + scrollY - row->top, &inside, &at);
+    Gfx::Free(l);
     if (!inside) return false;
     Vec<LinkSpan> links;
     FindLinks(d->items[idx].text, links);
     for (int i = 0; i < links.n; i++)
-        if ((int)m.textPosition >= links[i].start && (int)m.textPosition < links[i].start + links[i].len)
+        if (at >= links[i].start && at < links[i].start + links[i].len)
         {
             ShellExecuteW(nullptr, L"open", links[i].url.c(), nullptr, nullptr, SW_SHOWNORMAL);
             return true;
@@ -1822,17 +1696,17 @@ void NoteWin::RenderPreview()
     float S = Scale();
     float fs = (float)d->fontSize, ts = Min(TitleSize(d), 18.f), lineH = LineH(d);
     const float padX = 16, padT = 12, padB = 12, maxW = 360, maxH = 460;
-    IDWriteTextFormat* ft = MakeFormat(ts, 700, false);
-    IDWriteTextFormat* fb = MakeFormat(fs, d->fontWeight, true);
-    IDWriteTextLayout* lt = MakeLayout(d->title, ft, maxW - 2 * padX, 0);
+    NoteFont ft = MakeFormat(ts, 700, false);
+    NoteFont fb = MakeFormat(fs, d->fontWeight, true);
+    TextLayout* lt = MakeLayout(d->title, ft, maxW - 2 * padX, 0);
     float contentW = Min(LayoutWidth(lt), maxW - 2 * padX);
     float markW = d->checkboxes ? CheckColW(d) : R0(fs * 0.9f);
     float gap = R0(fs * 0.35f);
-    Vec<IDWriteTextLayout*> ls;
+    Vec<TextLayout*> ls;
     float h = padT + LayoutHeight(lt) + 8;
     if (d->items.n == 0)
     {
-        IDWriteTextLayout* l = MakeLayout(Str(L"（空）"), fb, maxW - 2 * padX, lineH);
+        TextLayout* l = MakeLayout(Str(L"（空）"), fb, maxW - 2 * padX, lineH);
         contentW = Max(contentW, LayoutWidth(l));
         ls.Push(l);
         h += LayoutHeight(l);
@@ -1842,7 +1716,7 @@ void NoteWin::RenderPreview()
         const NoteItem& it = d->items[i];
         float chip = ChipWidth(d, it);
         float avail = maxW - 2 * padX - markW - (chip > 0 ? chip + 8 : 0);
-        IDWriteTextLayout* l = ItemLayout(d, it, fb, avail, nullptr, false);
+        TextLayout* l = ItemLayout(d, it, fb, avail, false);
         contentW = Max(contentW, Min(LayoutWidth(l), avail) + markW + (chip > 0 ? chip + 8 : 0));
         ls.Push(l);
         h += Max(lineH, LayoutHeight(l)) + gap;
@@ -1851,21 +1725,17 @@ void NoteWin::RenderPreview()
     Canvas c;
     if (c.Begin((int)(W * S + 0.99f), (int)(H * S + 0.99f), 96 * S))
     {
-        ID2D1RenderTarget* rt = c.rt;
-        ID2D1SolidColorBrush *bg = nullptr, *fg = nullptr, *dim = nullptr;
-        rt->CreateSolidColorBrush(Gfx::Color(d->bgColor, (float)Max(d->opacity, 0.94)), &bg);
-        rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 1), &fg);
-        rt->CreateSolidColorBrush(Gfx::Color(d->textColor, 0.55f), &dim);
-        rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(0, 0, W, H), 8, 8), bg);
-        Ui::Stroke(rt, D2D1::RectF(0, 0, W, H), 8, Argb(d->textColor, 0.16f), 1);
-        rt->PushAxisAlignedClip(D2D1::RectF(0, 0, W, H - padB / 2), D2D1_ANTIALIAS_MODE_ALIASED);
+        Painter* rt = c.rt;
+        Gfx::GrayscaleText(rt);
+        Ui::Fill(rt, RectF(0, 0, W, H), 8, Argb(d->bgColor, (float)Max(d->opacity, 0.94)));
+        Ui::Stroke(rt, RectF(0, 0, W, H), 8, Argb(d->textColor, 0.16f), 1);
+        Gfx::PushClip(rt, RectF(0, 0, W, H - padB / 2));
         float y = padT;
-        rt->DrawTextLayout(D2D1::Point2F(padX, y), lt, fg, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        Gfx::Draw(rt, lt, padX, y, Argb(d->textColor, 1));
         y += LayoutHeight(lt) + 8;
         for (int i = 0; i < ls.n; i++)
         {
-            if (d->items.n == 0) { rt->DrawTextLayout(D2D1::Point2F(padX, y), ls[i], dim); break; }
+            if (d->items.n == 0) { Gfx::Draw(rt, ls[i], padX, y, Argb(d->textColor, 0.55f)); break; }
             const NoteItem& it = d->items[i];
             bool done = d->checkboxes && it.done;
             if (d->checkboxes)
@@ -1874,15 +1744,11 @@ void NoteWin::RenderPreview()
                 DrawCheck(rt, d, padX, y + (lineH - size) / 2, size, it.done, false, 1);
             }
             else Ui::Circle(rt, padX + 4, y + lineH / 2, 2.5f, Argb(d->textColor, 0.55f));
-            ID2D1SolidColorBrush* tb = nullptr;
-            rt->CreateSolidColorBrush(Gfx::Color(d->textColor, done ? 0.45f : 1.f), &tb);
-            rt->DrawTextLayout(D2D1::Point2F(padX + markW, y), ls[i], tb, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-            SafeRelease(tb);
+            Gfx::Draw(rt, ls[i], padX + markW, y, Argb(d->textColor, done ? 0.45f : 1.f));
             if (it.hasRemind) DrawChip(rt, d, it, W - padX - ChipWidth(d, it), y + (lineH - ChipH(d)) / 2, done ? 0.5f : 1.f);
             y += Max(lineH, LayoutHeight(ls[i])) + gap;
         }
-        rt->PopAxisAlignedClip();
-        SafeRelease(bg); SafeRelease(fg); SafeRelease(dim);
+        Gfx::PopClip(rt);
     }
     // 往屏幕里面的方向弹出
     RECT r;
@@ -1899,8 +1765,8 @@ void NoteWin::RenderPreview()
     if (x < wa.left) x = wa.left;
     SetWindowPos(preview, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
     c.End(preview);
-    for (int i = 0; i < ls.n; i++) SafeRelease(ls[i]);
-    SafeRelease(lt); SafeRelease(ft); SafeRelease(fb);
+    for (int i = 0; i < ls.n; i++) Gfx::Free(ls[i]);
+    Gfx::Free(lt);
 }
 
 LRESULT CALLBACK NoteWin::PreviewProc(HWND h, UINT m, WPARAM w, LPARAM l)

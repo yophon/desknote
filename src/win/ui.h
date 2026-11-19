@@ -4,15 +4,17 @@
 
 template <class T> inline void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
-// 画布：一块 32 位位图 + Direct2D 渲染目标
+// 画布：一块 32 位位图 + Direct2D 渲染目标；在上面画东西用 rt（gfx.h 的绘图接口）
 // 分层窗口用 End(hwnd) 交给 UpdateLayeredWindow；普通窗口用 EndBlt(hdc) 贴到窗口上
+struct ID2D1DCRenderTarget;
 struct Canvas
 {
     HDC screen = nullptr, mem = nullptr;
     HBITMAP bmp = nullptr;
     HGDIOBJ old = nullptr;
     void* bits = nullptr;
-    ID2D1DCRenderTarget* rt = nullptr;
+    ID2D1DCRenderTarget* dc = nullptr;
+    Painter* rt = nullptr;
     int pw = 0, ph = 0;
 
     bool Begin(int w, int h, float dpi, bool opaque = false);
@@ -41,25 +43,10 @@ namespace Ui
     void LoadTheme(); // 读系统深浅色和强调色
     void AllowDarkControls(HWND h); // 让系统控件（输入框右键菜单等）跟随深色
 
-    D2D1_COLOR_F C(u32 argb);
     u32 Solid(u32 over, u32 base); // 半透明色叠到不透明底色上
     COLORREF Ref(u32 argb);        // 给 GDI 用
 
-    enum { Left, Center, Right };
-    void Fill(ID2D1RenderTarget* rt, D2D1_RECT_F r, float radius, u32 argb);
-    void FillCorners(ID2D1RenderTarget* rt, D2D1_RECT_F r, float tl, float tr, float br, float bl, u32 argb);
-    void Stroke(ID2D1RenderTarget* rt, D2D1_RECT_F r, float radius, u32 argb, float width = 1);
-    void Circle(ID2D1RenderTarget* rt, float cx, float cy, float radius, u32 argb);
-    void Ring(ID2D1RenderTarget* rt, float cx, float cy, float radius, u32 argb, float width);
-    void Line(ID2D1RenderTarget* rt, float x0, float y0, float x1, float y1, u32 argb, float width = 1);
-    void Shadow(ID2D1RenderTarget* rt, D2D1_RECT_F r, float radius, int layers, float alpha, float dy);
-    // 单行文字，在 r 里垂直居中，放不下显示省略号；返回文字宽度
-    float Text(ID2D1RenderTarget* rt, const Str& s, D2D1_RECT_F r, float size, int weight, u32 argb, int align = Left);
-    // 多行文字，返回高度
-    float TextWrap(ID2D1RenderTarget* rt, const Str& s, float x, float y, float w, float size, int weight, u32 argb);
-    float Measure(const Str& s, float size, int weight);
-    float MeasureWrap(const Str& s, float w, float size, int weight);
-    void Icon(ID2D1RenderTarget* rt, wchar_t glyph, float cx, float cy, float size, u32 argb);
+    // 画图形、文字的小工具在 gfx.h
 
     // ---------------------------------------------------------------
     // 弹出菜单
