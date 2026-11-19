@@ -11,3 +11,5 @@
 #include "version.h"
 
 void SplitTime(Time t, SYSTEMTIME* st); // 界面代码用 SYSTEMTIME，换算在 plat_win.cpp
+extern HINSTANCE g_inst;
+extern HICON g_icon, g_iconSmall; // 程序图标（app_win.cpp 启动时加载）

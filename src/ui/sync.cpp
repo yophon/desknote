@@ -2,16 +2,17 @@
 #include "app.h"
 #include "syncengine.h"
 #include "plat.h"
+#include "shell.h"
 
 static void SyncThread(void* arg)
 {
     Plan* p = (Plan*)arg;
     SyncCompute(p);
-    PostMessageW(g_app->msgWnd, WM_APP_SYNCDONE, 0, (LPARAM)p);
+    Shell::PostSyncDone(p);
 }
 
 // 实时推送收到改动（后台线程）：交给主线程，稍等一下合并几条再同步
-static void OnRemoteChange() { PostMessageW(g_app->msgWnd, WM_APP_REMOTECHANGE, 0, 0); }
+static void OnRemoteChange() { Shell::PostRemoteChange(); }
 
 // ---------------------------------------------------------------------
 // 同步器（界面线程）
@@ -22,7 +23,7 @@ public:
     SyncState state;
     Str status = L"未启用";
     bool failed = false, running = false, again = false;
-    DWORD debounceAt = 0, nextPeriodic = 0;
+    u64 debounceAt = 0, nextPeriodic = 0;
     Str readyFolder;
 
     bool Configured() const
@@ -50,8 +51,8 @@ void SyncStart(Syncer* s)
     s->nextPeriodic = 0;
     SyncLiveRestart(g_app->settings.syncServer, g_app->settings.syncKey, s->Configured(), OnRemoteChange);
     if (!s->Configured()) { s->SetStatus(g_app->settings.syncEnabled ? Str(L"还没填服务器地址或密钥") : Str(L"未启用"), false); return; }
-    s->debounceAt = GetTickCount() + 1000;
-    s->nextPeriodic = GetTickCount() + 5 * 60 * 1000; // 定时拉一次别的电脑的改动（连上实时推送后放慢到 30 分钟，只当兜底）
+    s->debounceAt = TickMs() + 1000;
+    s->nextPeriodic = TickMs() + 5 * 60 * 1000; // 定时拉一次别的电脑的改动（连上实时推送后放慢到 30 分钟，只当兜底）
 }
 
 // 便签存过盘：内容跟上次同步时不一样才安排同步（只是挪了位置不算），几秒内的连续改动只同步一次
@@ -69,15 +70,15 @@ void SyncTouch(Syncer* s)
         if (!k || k->local != Sha256Hex(w->d->ContentJson())) changed = true;
     }
     for (int i = 0; i < s->state.notes.n && !changed; i++) if (!seen.Contains(s->state.notes[i].id)) changed = true;
-    if (changed) s->debounceAt = GetTickCount() + 1500;
+    if (changed) s->debounceAt = TickMs() + 1500;
 }
 
 void SyncTick(Syncer* s)
 {
     if (!s || !s->Configured()) return;
-    DWORD now = GetTickCount();
-    if (s->debounceAt && (int)(now - s->debounceAt) >= 0) { s->debounceAt = 0; SyncNow(s); }
-    else if (s->nextPeriodic && (int)(now - s->nextPeriodic) >= 0)
+    u64 now = TickMs();
+    if (s->debounceAt && (i64)(now - s->debounceAt) >= 0) { s->debounceAt = 0; SyncNow(s); }
+    else if (s->nextPeriodic && (i64)(now - s->nextPeriodic) >= 0)
     {
         // gopan 每次调用都记审计日志：有实时推送时定时拉取只是兜底，放慢
         s->nextPeriodic = now + (SyncLiveConnected() ? 30 : 5) * 60 * 1000;
@@ -118,9 +119,9 @@ void SyncNow(Syncer* s)
     { s->running = false; delete p; s->SetStatus(Str(L"同步失败：无法启动后台线程"), true); }
 }
 
-void SyncOnDone(Syncer* s, LPARAM lp)
+void SyncOnDone(Syncer* s, void* plan)
 {
-    Plan* p = (Plan*)lp;
+    Plan* p = (Plan*)plan;
     s->running = false;
     if (p->failed) s->SetStatus(L"同步失败：" + p->error, true);
     else
@@ -174,7 +175,7 @@ void SyncOnDone(Syncer* s, LPARAM lp)
         s->SetStatus(msg, false);
     }
     delete p;
-    if (s->again) { s->again = false; SyncTouch(s); s->debounceAt = GetTickCount() + 500; }
+    if (s->again) { s->again = false; SyncTouch(s); s->debounceAt = TickMs() + 500; }
 }
 
 const Str& SyncStatus(Syncer* s)

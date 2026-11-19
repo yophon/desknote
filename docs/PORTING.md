@@ -21,10 +21,16 @@
    - 对话框（aa91a6c、ce12573）、弹出菜单（0c23d45）、便签窗口（含胶囊、悬停预览）都改成了 `WinHandler`；`dialogs.cpp`、`note.cpp` 里不再有 Win32 调用。
    - 平台拿不准的事反过来问界面代码：光标形状、要不要压在最下面、拖动时保持多大、最小多大、要不要自己画输入法组字。
    - 截图和回归测试都和改造前一致；拖动、改大小、输入法、胶囊吸边、置底这些交互要手动试。
-4. **程序主体和窗口分开**：`App`、`NoteWin` 里的 `HWND` 换成 `Window*`；托盘、通知、全局快捷键、开机自启、文件监视、单实例收进平台接口；`app.h` 不再引 `windows.h`。
-5. 把不再依赖 Windows 的界面代码从 `src/win` 搬到 `src/ui`，Linux 上能编译（还不能运行）。
+4. ~~程序主体和窗口分开~~：`src/ui/shell.h`（托盘、通知、全局快捷键、开机自启、定时器、文件夹监视、后台线程回主线程）；Windows 外壳在 `src/win/app_win.cpp`。日期显示改用核心的 `DateTime`，文件修改时间、转小写进了平台层。
+5. ~~界面代码搬到 `src/ui`~~：`app`、`note`、`dialogs`、`menu`、`sync` 不引用任何系统头文件，`tests/coretest.sh` 在 Linux 上检查它们能编译（零警告）。
 
-之后才是写 macOS / Linux 外壳。
+整理到此完成。接下来写 macOS / Linux 外壳，每个平台要实现：
+
+- `src/core/plat.h` 剩下的 HTTP、密钥保存（`src/posix/plat_posix.cpp` 里还是空的）。
+- `src/ui/gfx.h`：macOS 用 CoreGraphics + CoreText，Linux 用 Cairo + Pango。
+- `src/ui/window.h`：macOS 用 AppKit（NSWindow / NSView / NSTextInputClient），Linux 用 GTK4。
+- `src/ui/shell.h`：菜单栏图标 / 托盘、通知、全局快捷键、开机自启、定时器、文件夹监视。
+- 入口和主循环，以及 `Ui::LoadTheme`（读系统深浅色和强调色）。
 
 ## 验证方法
 

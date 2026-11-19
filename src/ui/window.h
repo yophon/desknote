@@ -72,6 +72,7 @@ struct Event
 // 窗口内容和事件由界面代码实现
 struct WinHandler
 {
+    virtual ~WinHandler() {}
     virtual void Paint(Window* w, Painter* p, float width, float height) = 0;
     virtual bool OnEvent(Window* w, const Event& e) = 0;
     // 平台需要时来问（都有默认答案）
@@ -159,6 +160,7 @@ namespace Wnd
     void Move(Window* w, int x, int y);       // 屏幕像素，大小不变
     void Hide(Window* w);
     void Activate(Window* w);                 // 带到前台并拿到键盘焦点
+    void Foreground(Window* w);               // 只带到前台
     void DragMove(Window* w);                 // 交给系统拖着走，松开鼠标后才返回
     void DragResize(Window* w, int edge);     // 交给系统拖边框：1 左 2 右 3 上 4 左上 5 右上 6 下 7 左下 8 右下
 
@@ -201,4 +203,5 @@ namespace Wnd
 
     // ---- 系统对话框 ----
     bool Confirm(Window* owner, const Str& title, const Str& text); // 确定 / 取消（警告样式）
+    bool Ask(Window* owner, const Str& title, const Str& text);     // 确定 / 取消（询问样式）
 }

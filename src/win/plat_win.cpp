@@ -83,6 +83,17 @@ bool DirExists(const wchar_t* path)
     DWORD a = GetFileAttributesW(path);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
+bool FileMTime(const wchar_t* path, Time* out)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) return false;
+    FILETIME local;
+    SYSTEMTIME st;
+    FileTimeToLocalFileTime(&fa.ftLastWriteTime, &local);
+    FileTimeToSystemTime(&local, &st);
+    *out = MakeTime(st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond) + (Time)st.wMilliseconds * 10000;
+    return true;
+}
 bool MakeDir(const wchar_t* path) { return CreateDirectoryW(path, nullptr) != FALSE; }
 bool RemoveFile(const wchar_t* path) { return DeleteFileW(path) != FALSE; }
 bool RemoveDir(const wchar_t* path) { return RemoveDirectoryW(path) != FALSE; }
@@ -110,6 +121,13 @@ bool ListDir(const wchar_t* dir, Vec<DirEntry>& out)
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return true;
+}
+
+Str LowerCase(const Str& s)
+{
+    Str t(s);
+    if (t.n) CharLowerBuffW(t.p, (DWORD)t.n);
+    return t;
 }
 
 // ---- 随机数 ----

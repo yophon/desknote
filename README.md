@@ -23,7 +23,7 @@ Windows 桌面便签：半透明待办清单，可置底在桌面 / 置顶 / 普
 
 C 风格 C++，不带 C 运行库（自己的内存、字符串、JSON），Direct2D + DirectWrite 软件渲染，绘图对象空闲几秒后整体释放。
 
-代码分层，为以后出 macOS、Linux 版做准备：`src/core` 是跨平台的核心，不引用任何系统头文件；`src/ui` 是界面层的跨平台接口；系统相关的都在平台目录里。
+代码分层，为出 macOS、Linux 版做准备（计划和进度见 `docs/PORTING.md`）：`src/core` 和 `src/ui` 不引用任何系统头文件，Linux 上能编译；系统相关的都在平台目录里。
 
 | 文件 | 内容 |
 |---|---|
@@ -33,21 +33,21 @@ C 风格 C++，不带 C 运行库（自己的内存、字符串、JSON），Dire
 | `src/core/store.*` | 便签、回收站、设置的读写，每日备份 |
 | `src/core/syncengine.*` | 同步引擎：gopan MCP 客户端、同步状态、一轮同步的计算、三方合并、实时推送连接 |
 | `src/core/links.*` | 条目里的链接识别 |
-| `src/ui/gfx.h` | 绘图接口：图形、文字排版、光标和选区的命中测试（界面代码只通过它画东西） |
-| `src/win/gfx_d2d.cpp` | 绘图接口的 Windows 实现（Direct2D + DirectWrite） |
-| `src/win/plat_win.cpp` | 平台层的 Windows 实现（WinHTTP、DPAPI 等）；`crt_win.cpp` 替代 C 运行库 |
-| `src/win/note.cpp` | 便签窗口：绘制、编辑、排序、撤销、胶囊、右键菜单 |
-| `src/win/ui.*` | 自绘界面共用部分：主题、画布、弹出菜单 |
-| `src/win/dialogs.cpp` | 设置、回收站、设置提醒、便签管理 |
-| `src/win/sync.cpp` | 同步调度：什么时候同步、同步完怎么改便签窗口 |
-| `src/win/app.cpp` | 入口、托盘、快捷键、开机自启、文件监视 |
-| `src/win/selftest.cpp` | 自测和内存诊断 |
+| `src/ui/gfx.h` | 绘图接口：图形、文字排版、光标和选区的命中测试 |
+| `src/ui/window.h` | 窗口和输入接口：对话框、弹出窗口、便签窗口、事件、输入法、剪贴板、原生输入框、屏幕 |
+| `src/ui/shell.h` | 系统外壳接口：托盘、通知、全局快捷键、开机自启、定时器、文件夹监视 |
+| `src/ui/app.*` | 程序主体：便签增删、回收站、提醒、同步联动、外部修改、提到最前、托盘菜单 |
+| `src/ui/note.cpp` | 便签窗口：绘制、编辑、排序、撤销、胶囊、右键菜单 |
+| `src/ui/menu.*` | 主题和仿 Win11 的弹出菜单 |
+| `src/ui/dialogs.cpp` | 设置、回收站、设置提醒、便签管理 |
+| `src/ui/sync.cpp` | 同步调度：什么时候同步、同步完怎么改便签 |
+| `src/win/` | Windows 外壳：`app_win.cpp`（入口、托盘、通知、快捷键、开机自启、主循环）、`window_win.cpp`（窗口和输入）、`gfx_d2d.cpp`（Direct2D + DirectWrite）、`ui_win.cpp`（画布、系统主题）、`plat_win.cpp`（WinHTTP、DPAPI 等）、`crt_win.cpp`（替代 C 运行库）、`selftest.cpp` |
 | `src/posix/plat_posix.cpp` | 平台层的 macOS / Linux 实现（还没接 HTTP 和密钥保存） |
 
 ## 测试与调试
 
 - 回归测试：`powershell -NoProfile -ExecutionPolicy Bypass -File tests\selftest.ps1`（编译到临时目录，用临时数据跑两轮自测；有 python 时连 `tests\mock_gopan.py` 测同步）
-- 核心测试（只测 `src/core`，各平台同一套）：Windows `tests\coretest.cmd`；Linux / macOS `sh tests/coretest.sh`（要 C++17 编译器）
+- 核心测试（只测 `src/core`，各平台同一套）：Windows `tests\coretest.cmd`；Linux / macOS `sh tests/coretest.sh`（要 C++17 编译器；还会检查 `src/ui` 能不能编译）
 - 独立数据目录：`DeskNote.exe --data <目录>`（不影响正在用的便签，也不改开机自启）
 - 内存诊断：`DeskNote.exe --data <测试目录> --memdiag <结果文件>`
 - 直接打开界面：`--open trash|settings|reminder|edit|capsule|preview|hover|menu|menu1|menu2|traymenu`；`--theme light|dark` 强制深浅色

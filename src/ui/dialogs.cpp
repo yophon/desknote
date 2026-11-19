@@ -1,11 +1,7 @@
 // 回收站、设置、提醒对话框（都是自绘，跟随系统深浅色）
-#include "ui.h"
-#include "window_win.h"
-#include <dwmapi.h>
-#include <imm.h>
-#include <commctrl.h>
-#include <shellapi.h>
-#include <windowsx.h>
+#include "app.h"
+#include "menu.h"
+#include "shell.h"
 
 // =====================================================================
 // 快捷键文字 <-> 修饰键 + 按键
@@ -73,24 +69,24 @@ struct TrashWin : WinHandler
 
     static Str DayLabel(Time t)
     {
-        SYSTEMTIME st;
+        DateTime st;
         SplitTime(t, &st);
-        Time day = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+        Time day = MakeTime(st.year, st.month, st.day, 0, 0, 0);
         Time today = Today();
         if (day == today) return Str(L"今天");
         if (day == today - TicksPerDay) return Str(L"昨天");
-        SYSTEMTIME now;
-        GetLocalTime(&now);
+        DateTime now;
+        LocalNow(&now);
         Str s;
-        if (st.wYear != now.wYear) s.Int(st.wYear).Append(L"年");
-        s.Int(st.wMonth).Append(L"月").Int(st.wDay).Append(L"日");
+        if (st.year != now.year) s.Int(st.year).Append(L"年");
+        s.Int(st.month).Append(L"月").Int(st.day).Append(L"日");
         return s;
     }
     static Time DayOf(Time t)
     {
-        SYSTEMTIME st;
+        DateTime st;
         SplitTime(t, &st);
-        return MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+        return MakeTime(st.year, st.month, st.day, 0, 0, 0);
     }
 
     // 普通按钮 / 图标按钮
@@ -201,10 +197,10 @@ struct TrashWin : WinHandler
                     sub = L"来自「" + e->noteTitle + L"」";
                     if (e->item.done) sub += L" · 已完成";
                 }
-                SYSTEMTIME st;
+                DateTime st;
                 SplitTime(e->deletedAt, &st);
                 sub += L" · ";
-                sub.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute).Append(L" 删除");
+                sub.Pad2(st.hour).Ch(L':').Pad2(st.minute).Append(L" 删除");
                 float textL = L + 16 + 20 + 16, textR = restore.left - 16;
                 Ui::Text(rt, main, RectF(textL, cy - 19, textR, cy + 1), 14, 400, T.text);
                 Ui::Text(rt, sub, RectF(textL, cy + 1, textR, cy + 18), 12, 400, T.text2);
@@ -562,7 +558,7 @@ struct SettingsWin : WinHandler
         RectF c = Card(rt, y, 0xE7E8, Str(L"开机自动启动"),
                              Str(g_app->isDefaultDir ? L"移动 exe 后，打开一次新位置的 exe，自启会跟着改过去" : L"用测试数据目录打开时不可用"),
                              T.text2, 84, true, 0);
-        Toggle(rt, SAuto, App::IsAutoStart(), g_app->isDefaultDir, R - 16, (c.top + c.bottom) / 2);
+        Toggle(rt, SAuto, Shell::AutoStartGet(), g_app->isDefaultDir, R - 16, (c.top + c.bottom) / 2);
         y += 4;
         {
             Str desc;
@@ -772,7 +768,7 @@ struct SettingsWin : WinHandler
         Settings& s = g_app->settings;
         switch (id)
         {
-        case SAuto: if (g_app->isDefaultDir) App::SetAutoStart(!App::IsAutoStart()); break;
+        case SAuto: if (g_app->isDefaultDir) Shell::AutoStartSet(!Shell::AutoStartGet()); break;
         case SHkToggle:
         {
             recording = false;
@@ -962,10 +958,10 @@ struct ReminderWin : WinHandler
         if (shown.n > 80) { shown.Truncate(80); shown += L"…"; }
         itemText = shown;
         hasCurrent = has;
-        SYSTEMTIME now;
-        GetLocalTime(&now);
+        DateTime now;
+        LocalNow(&now);
         Time t0 = Now();
-        Time minuteNow = MakeTime(now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, 0);
+        Time minuteNow = MakeTime(now.year, now.month, now.day, now.hour, now.minute, 0);
         quick[quickN] = minuteNow + 30 * TicksPerMinute; quickLabel[quickN++] = L"30 分钟后";
         quick[quickN] = minuteNow + 60 * TicksPerMinute; quickLabel[quickN++] = L"1 小时后";
         Time tonight = Today() + 20 * 60 * TicksPerMinute;
@@ -973,11 +969,11 @@ struct ReminderWin : WinHandler
         quick[quickN] = Today() + TicksPerDay + 9 * 60 * TicksPerMinute; quickLabel[quickN++] = L"明早";
         // 自定义的初始值：已有提醒就用它，否则一小时后（取整到 5 分钟）
         Time init = has ? current : minuteNow + 60 * TicksPerMinute;
-        SYSTEMTIME st;
+        DateTime st;
         SplitTime(init, &st);
-        int mins = st.wHour * 60 + st.wMinute;
+        int mins = st.hour * 60 + st.minute;
         if (!has) mins = (mins + 4) / 5 * 5;
-        day = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+        day = MakeTime(st.year, st.month, st.day, 0, 0, 0);
         if (mins >= 24 * 60) { mins -= 24 * 60; day += TicksPerDay; }
         // 只输数字，不要输入法（中文标点会把冒号变成全角）
         timeEdit = Wnd::CreateField(win, Str(), Wnd::FieldCenter | Wnd::FieldNoIme);
@@ -1035,27 +1031,27 @@ struct ReminderWin : WinHandler
     static Str DayText(Time d)
     {
         static const wchar_t* wk[7] = { L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六" };
-        SYSTEMTIME st;
+        DateTime st;
         SplitTime(d, &st);
         Time today = Today();
         Str s;
         if (d == today) s = L"今天 ";
         else if (d == today + TicksPerDay) s = L"明天 ";
         else if (d == today + 2 * TicksPerDay) s = L"后天 ";
-        SYSTEMTIME now;
-        GetLocalTime(&now);
-        if (st.wYear != now.wYear) s.Int(st.wYear).Append(L"年");
-        s.Int(st.wMonth).Append(L"月").Int(st.wDay).Append(L"日 ").Append(wk[st.wDayOfWeek % 7]);
+        DateTime now;
+        LocalNow(&now);
+        if (st.year != now.year) s.Int(st.year).Append(L"年");
+        s.Int(st.month).Append(L"月").Int(st.day).Append(L"日 ").Append(wk[st.dayOfWeek % 7]);
         return s;
     }
     static Str WhenText(Time t)
     {
-        SYSTEMTIME st;
+        DateTime st;
         SplitTime(t, &st);
-        Time d = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+        Time d = MakeTime(st.year, st.month, st.day, 0, 0, 0);
         Str s;
         if (d == Today() + TicksPerDay) s = L"明天 ";
-        s.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute);
+        s.Pad2(st.hour).Ch(L':').Pad2(st.minute);
         return s;
     }
 
@@ -1305,41 +1301,34 @@ static void DrawToggle(Painter* rt, RectF tr, bool on, bool hot)
 static u32 Rgb(u32 rgb, float a) { return ((u32)(Clamp(a, 0.f, 1.f) * 255 + 0.5f) << 24) | (rgb & 0xFFFFFF); }
 
 // 便签文件的修改时间（本地时间）
-static bool NoteModified(const Str& id, SYSTEMTIME* st, u64* key)
+static bool NoteModified(const Str& id, DateTime* st, u64* key)
 {
-    WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (!GetFileAttributesExW(Store::NotePath(id).c(), GetFileExInfoStandard, &fa)) return false;
-    *key = ((u64)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
-    FILETIME local;
-    FileTimeToLocalFileTime(&fa.ftLastWriteTime, &local);
-    FileTimeToSystemTime(&local, st);
+    Time t;
+    if (!FileMTime(Store::NotePath(id).c(), &t)) return false;
+    *key = (u64)t;
+    SplitTime(t, st);
     return true;
 }
 
-static Str WhenText(const SYSTEMTIME& st)
+static Str WhenText(const DateTime& st)
 {
-    SYSTEMTIME now;
-    GetLocalTime(&now);
-    Time day = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+    DateTime now;
+    LocalNow(&now);
+    Time day = MakeTime(st.year, st.month, st.day, 0, 0, 0);
     Str s;
     if (day == Today()) s = L"今天 ";
     else if (day == Today() - TicksPerDay) s = L"昨天 ";
     else
     {
-        if (st.wYear != now.wYear) s.Int(st.wYear).Append(L"年");
-        s.Int(st.wMonth).Append(L"月").Int(st.wDay).Append(L"日");
+        if (st.year != now.year) s.Int(st.year).Append(L"年");
+        s.Int(st.month).Append(L"月").Int(st.day).Append(L"日");
         return s;
     }
-    s.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute);
+    s.Pad2(st.hour).Ch(L':').Pad2(st.minute);
     return s;
 }
 
-static Str Lower(const Str& s)
-{
-    Str t = s;
-    if (t.n) CharLowerBuffW(t.p, (DWORD)t.n);
-    return t;
-}
+static Str Lower(const Str& s) { return LowerCase(s); }
 
 struct ManageWin : WinHandler
 {
@@ -1369,7 +1358,7 @@ struct ManageWin : WinHandler
     }
     Str Query() { return Lower(Wnd::FieldText(search).Trim()); }
 
-    struct Entry { NoteWin* w; u64 key; SYSTEMTIME st; bool hasTime; };
+    struct Entry { NoteWin* w; u64 key; DateTime st; bool hasTime; };
     // 按搜索过滤，按修改时间从新到旧
     void Collect(Vec<Entry>& out)
     {
@@ -1603,7 +1592,7 @@ struct ManageWin : WinHandler
                 if (hits[i].id == HSettings && hits[i].w == w)
                 {
                     PointI p = Wnd::ToScreen(win, hits[i].r.left, hits[i].r.bottom - scroll + 2);
-                    w->ShowSettingsMenu(p.x, p.y, Wnd::H(win));
+                    w->ShowSettingsMenu(p.x, p.y, Wnd::Native(win));
                     break;
                 }
             break;
@@ -1662,7 +1651,7 @@ struct ManageWin : WinHandler
                 if (HitAt(ev.x, ev.y, &n) && Alive(n))
                 {
                     PointI p = Wnd::ToScreen(w, ev.x, ev.y);
-                    n->ShowSettingsMenu(p.x, p.y, Wnd::H(w));
+                    n->ShowSettingsMenu(p.x, p.y, Wnd::Native(w));
                 }
                 return true;
             }

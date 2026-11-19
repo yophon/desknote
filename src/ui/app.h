@@ -1,6 +1,7 @@
 // 程序共用的声明：程序主体、便签窗口、绘图资源、对话框、同步
 #pragma once
-#include "win.h"
+#include "rt.h"
+#include "version.h"
 #include "store.h"
 #include "links.h"
 #include "window.h"
@@ -12,11 +13,6 @@ namespace Ui { struct Menu; }
 #define URL_DESKNOTE_REPO L"https://github.com/yophon/desknote"
 #define URL_GOPAN_REPO    L"https://github.com/yophon/gopan"
 #define URL_GOPAN_WEB     L"https://drive.979687.xyz"
-
-// 程序内部消息
-#define WM_APP_TRAY        (WM_APP + 1)
-#define WM_APP_SYNCDONE    (WM_APP + 2)
-#define WM_APP_REMOTECHANGE (WM_APP + 3) // 实时推送：网盘里有改动
 
 // ---------------------------------------------------------------------
 // 便签窗口
@@ -217,7 +213,7 @@ Syncer* SyncCreate();
 void SyncStart(Syncer* s);
 void SyncNow(Syncer* s);
 void SyncTouch(Syncer* s);
-void SyncOnDone(Syncer* s, LPARAM plan);
+void SyncOnDone(Syncer* s, void* plan);
 void SyncTick(Syncer* s);
 const Str& SyncStatus(Syncer* s);
 bool SyncFailed(Syncer* s);
@@ -237,13 +233,11 @@ struct App
     bool silent = false;
     bool exiting = false;
     bool peeking = false;
-    HWND msgWnd = nullptr;
     Window* trashWnd = nullptr;
     Window* manageWnd = nullptr;
     Window* settingsWnd = nullptr;
     NoteWin* balloonNote = nullptr;
     Syncer* sync = nullptr;
-    HICON icon = nullptr, iconSmall = nullptr;
 
     void Start();
     NoteWin* OpenWindow(NoteData* n);
@@ -274,12 +268,17 @@ struct App
     void CheckFileChanges();
     void Exit();
 
-    static bool IsAutoStart();
-    static void SetAutoStart(bool on);
-    static void FixAutoStartPath();
+    // 系统外壳（shell.h）交过来的事
+    enum { TimerReminders = 1, TimerGfx = 2, TimerBackup = 3, TimerFiles = 4, TimerSync = 5, TimerRemote = 6 };
+    void OnTimer(int id);
+    void OnTrayClick() { TogglePeek(); }
+    void OnTrayMenu(int sx, int sy);
+    void OnNoticeClicked();
+    void OnFolderChanged();
+    void OnRemoteChange();
+    void TrayMenu(int sx, int sy);
 };
 extern App* g_app;
-extern HINSTANCE g_inst;
 
 // 对话框（dialogs.cpp）
 Window* ManageWindowCreate();

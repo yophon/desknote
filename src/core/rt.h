@@ -201,6 +201,7 @@ bool WriteAtomic(const wchar_t* path, const Str& text);    // 写 .tmp 再替换
 bool ReplaceWithFile(const wchar_t* path, const wchar_t* tmp); // 各平台实现：用 tmp 原子替换 path
 bool FileExists(const wchar_t* path);                      // 各平台实现
 bool DirExists(const wchar_t* path);                       // 各平台实现
+bool FileMTime(const wchar_t* path, Time* out);            // 各平台实现：最后修改时间（本地时间）
 bool MakeDir(const wchar_t* path);                         // 各平台实现：只建一层
 void EnsureDir(const wchar_t* path);                       // 逐层建
 bool RemoveFile(const wchar_t* path);                      // 各平台实现
@@ -216,6 +217,7 @@ Str PathStem(const Str& p);
 
 // ---- 杂项 ----
 bool RandomBytes(void* out, int n);  // 各平台实现：系统的安全随机数
+Str LowerCase(const Str& s);         // 各平台实现：按系统的 Unicode 规则转小写（搜索用）
 u32 RandomU32();
 Str HexOf(const u8* d, int n);
 void Sha256(const void* d, int n, u8 out[32]);

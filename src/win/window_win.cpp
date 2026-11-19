@@ -726,7 +726,7 @@ namespace Wnd
             wc.lpfnWndProc = NoteProc;
             wc.hInstance = g_inst;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hIcon = g_app->icon;
+            wc.hIcon = g_icon;
             wc.lpszClassName = NoteClass;
             RegisterClassW(&wc);
             g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
@@ -777,6 +777,7 @@ namespace Wnd
     }
     void Hide(Window* w) { ShowWindow(w->hwnd, SW_HIDE); }
     void Activate(Window* w) { SetForegroundWindow(w->hwnd); SetFocus(w->hwnd); }
+    void Foreground(Window* w) { SetForegroundWindow(w->hwnd); }
     void DragMove(Window* w)
     {
         ReleaseCapture();
@@ -952,8 +953,8 @@ namespace Wnd
         w->dpi = GetDpiForWindow(hw);
         if (d.appIcon)
         {
-            SendMessageW(hw, WM_SETICON, ICON_BIG, (LPARAM)g_app->icon);
-            SendMessageW(hw, WM_SETICON, ICON_SMALL, (LPARAM)g_app->iconSmall);
+            SendMessageW(hw, WM_SETICON, ICON_BIG, (LPARAM)g_icon);
+            SendMessageW(hw, WM_SETICON, ICON_SMALL, (LPARAM)g_iconSmall);
         }
         ApplyFrameTheme(hw);
         if (!d.owner) g_dialogs.Push(w); // 模态的在自己的循环里做导航
@@ -1116,6 +1117,10 @@ namespace Wnd
     void OpenUrl(const Str& url) { ShellExecuteW(nullptr, L"open", url.c(), nullptr, nullptr, SW_SHOWNORMAL); }
     void OpenFolder(const Str& path) { ShellExecuteW(nullptr, L"open", L"explorer.exe", path.c(), nullptr, SW_SHOWNORMAL); }
 
+    bool Ask(Window* owner, const Str& title, const Str& text)
+    {
+        return MessageBoxW(owner ? owner->hwnd : nullptr, text.c(), title.c(), MB_OKCANCEL | MB_ICONQUESTION) == IDOK;
+    }
     bool Confirm(Window* owner, const Str& title, const Str& text)
     {
         return MessageBoxW(owner ? owner->hwnd : nullptr, text.c(), title.c(), MB_OKCANCEL | MB_ICONWARNING) == IDOK;

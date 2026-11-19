@@ -1,5 +1,6 @@
 // 一张便签的窗口：绘制、布局、鼠标键盘、编辑、排序、撤销、胶囊、窗口模式、右键菜单
-#include "ui.h"
+#include "app.h"
+#include "menu.h"
 
 // =====================================================================
 // 便签正文的排版（gfx.h 的 FontNote；固定行高时基线在 0.78 处）
@@ -36,19 +37,19 @@ static const u32 DueColor = 0xE55B5B;
 
 static Str FormatWhen(Time t)
 {
-    SYSTEMTIME st;
+    DateTime st;
     SplitTime(t, &st);
-    Time day = MakeTime(st.wYear, st.wMonth, st.wDay, 0, 0, 0);
+    Time day = MakeTime(st.year, st.month, st.day, 0, 0, 0);
     Time today = Today();
     Str hm;
-    hm.Pad2(st.wHour).Ch(L':').Pad2(st.wMinute);
+    hm.Pad2(st.hour).Ch(L':').Pad2(st.minute);
     if (day == today) return hm;
     if (day == today + TicksPerDay) return L"明天 " + hm;
-    SYSTEMTIME now;
-    GetLocalTime(&now);
+    DateTime now;
+    LocalNow(&now);
     Str s;
-    if (st.wYear == now.wYear) s.Int(st.wMonth).Append(L"月").Int(st.wDay).Append(L"日 ");
-    else s.Int(st.wYear).Ch(L'-').Int(st.wMonth).Ch(L'-').Int(st.wDay).Ch(L' ');
+    if (st.year == now.year) s.Int(st.month).Append(L"月").Int(st.day).Append(L"日 ");
+    else s.Int(st.year).Ch(L'-').Int(st.month).Ch(L'-').Int(st.day).Ch(L' ');
     return s + hm;
 }
 
@@ -391,9 +392,9 @@ int NoteWin::HitEdge(float x, float y) const
     Wnd::ClientSize(win, &W, &H);
     const float e = 8;
     bool l = x < e, r = x > W - e, t = y < e, b = y > H - e;
-    if (t && l) return 4; if (t && r) return 5; if (b && l) return 7; if (b && r) return 8;
-    if (l) return 1; if (r) return 2; if (t) return 3; if (b) return 6;
-    return 0;
+    if (t) return l ? 4 : r ? 5 : 3;
+    if (b) return l ? 7 : r ? 8 : 6;
+    return l ? 1 : r ? 2 : 0;
 }
 
 // =====================================================================

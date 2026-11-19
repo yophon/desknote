@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wctype.h>
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -121,6 +122,14 @@ bool DirExists(const wchar_t* path)
     struct stat st;
     return stat(Path8(path).c(), &st) == 0 && S_ISDIR(st.st_mode);
 }
+static Time LocalTimeOf(time_t secs);
+bool FileMTime(const wchar_t* path, Time* out)
+{
+    struct stat st;
+    if (stat(Path8(path).c(), &st) != 0) return false;
+    *out = LocalTimeOf(st.st_mtime);
+    return true;
+}
 bool MakeDir(const wchar_t* path) { return mkdir(Path8(path).c(), 0755) == 0; }
 bool RemoveFile(const wchar_t* path) { return unlink(Path8(path).c()) == 0; }
 bool RemoveDir(const wchar_t* path) { return rmdir(Path8(path).c()) == 0; }
@@ -163,6 +172,13 @@ bool ListDir(const wchar_t* dir, Vec<DirEntry>& out)
     }
     closedir(d);
     return true;
+}
+
+Str LowerCase(const Str& s)
+{
+    Str t(s);
+    for (int i = 0; i < t.n; i++) t.p[i] = (wchar_t)towlower((wint_t)t.p[i]);
+    return t;
 }
 
 // ---- 随机数 ----
