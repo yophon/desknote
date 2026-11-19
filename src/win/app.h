@@ -237,7 +237,7 @@ struct App
     HWND msgWnd = nullptr;
     Window* trashWnd = nullptr;
     Window* manageWnd = nullptr;
-    HWND settingsWnd = nullptr;
+    Window* settingsWnd = nullptr;
     NoteWin* balloonNote = nullptr;
     Syncer* sync = nullptr;
     HICON icon = nullptr, iconSmall = nullptr;
@@ -267,6 +267,7 @@ struct App
     void OpenSyncedNote(NoteData* n);
     void CreateNoteFromContent(const Str& json, const wchar_t* suffix);
     const wchar_t* ApplyHotkey(); // nullptr = 成功
+    void PauseHotkey();           // 录新快捷键时先放开旧的
     void CheckFileChanges();
     void Exit();
 
@@ -282,13 +283,11 @@ Window* ManageWindowCreate();
 void ManageWindowRefresh(Window* w);
 Window* TrashWindowCreate();
 void TrashWindowRefresh(Window* w);
-HWND SettingsWindowCreate();
-void SettingsWindowSyncStatus(HWND w);
-bool SettingsWindowWantsKeys(HWND w); // 正在录快捷键：按键别交给对话框导航处理
+Window* SettingsWindowCreate();
+void SettingsWindowSyncStatus(Window* w);
 int ReminderDialog(HWND owner, const Str& itemText, bool hasCurrent, Time current, Time* result); // 0 取消，1 设定，2 移除
-bool HotkeyParse(const Str& s, UINT* mods, UINT* vk);
-Str HotkeyFormat(UINT mods, UINT vk);
-void RegisterDialogClasses();
+bool HotkeyParse(const Str& s, int* mods, int* vk); // 修饰键是 Mod*，按键是 Key*
+Str HotkeyFormat(int mods, int vk);
 
 
 // 自测（selftest.cpp）

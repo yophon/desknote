@@ -541,7 +541,7 @@ void MemDiagRun(const Str& outFile)
     Pump(5000);
     Sample(out, L"空闲 5 秒后");
     NoteWin* w = g_app->notes[0];
-    for (int i = 0; i < 3; i++) { g_app->ShowSettings(); Pump(300); DestroyWindow(g_app->settingsWnd); }
+    for (int i = 0; i < 3; i++) { g_app->ShowSettings(); Pump(300); Wnd::Destroy(g_app->settingsWnd); }
     Sample(out, L"开关设置窗口 3 次");
     for (int i = 0; i < 3; i++) { g_app->ShowTrash(); Pump(300); Wnd::Destroy(g_app->trashWnd); }
     Sample(out, L"开关回收站 3 次");
@@ -549,7 +549,7 @@ void MemDiagRun(const Str& outFile)
     Sample(out, L"重绘 200 次");
     Pump(4500);
     Sample(out, L"空闲后（释放绘图）");
-    for (int i = 0; i < 20; i++) { g_app->ShowSettings(); Pump(200); DestroyWindow(g_app->settingsWnd); }
+    for (int i = 0; i < 20; i++) { g_app->ShowSettings(); Pump(200); Wnd::Destroy(g_app->settingsWnd); }
     Pump(4500);
     Sample(out, L"再开关设置 20 次、空闲后（看有没有越开越多）");
     Bytes b = ToUtf8(out);

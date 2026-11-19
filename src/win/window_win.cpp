@@ -4,6 +4,7 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <imm.h>
+#include <shellapi.h>
 
 struct TextField
 {
@@ -12,6 +13,7 @@ struct TextField
     HFONT font = nullptr;
     int lineH = 0;              // 字体行高（物理像素）
     float size = 14;
+    int fontKind = FontNote, weight = 400;
     u32 text = 0, bgRest = 0, bgFocus = 0;
     HBRUSH rest = nullptr, focus = nullptr;
 };
@@ -60,7 +62,9 @@ static TextField* FieldOf(Window* w, HWND h)
 static void FieldMakeFont(TextField* f)
 {
     if (f->font) DeleteObject(f->font);
-    f->font = CreateFontW(-(int)(f->size * ScaleOf(f->win) + 0.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
+    // 便签字体用微软雅黑 UI，界面字体用 Segoe UI（系统输入框画不了可变字体）
+    f->font = CreateFontW(-(int)(f->size * ScaleOf(f->win) + 0.5f), 0, 0, 0, f->weight, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0,
+                          f->fontKind == FontUi ? L"Segoe UI" : L"Microsoft YaHei UI");
     HDC dc = GetDC(f->hwnd);
     HGDIOBJ of = SelectObject(dc, f->font);
     TEXTMETRICW tm;
@@ -419,10 +423,10 @@ namespace Wnd
         Ui::AllowDarkControls(f->hwnd);
         if (flags & FieldNoIme) ImmAssociateContextEx(f->hwnd, nullptr, 0);
         w->fields.Push(f);
-        FieldStyle(f, 14, Ui::T.text, Ui::T.inputBg, Ui::T.inputFocusBg);
+        FieldStyle(f, FontNote, 14, 400, Ui::T.text, Ui::T.inputBg, Ui::T.inputFocusBg);
         return f;
     }
-    void FieldStyle(TextField* f, float fontSize, u32 textColor, u32 bgRest, u32 bgFocus)
+    void FieldStyle(TextField* f, int font, float fontSize, int weight, u32 textColor, u32 bgRest, u32 bgFocus)
     {
         f->text = textColor;
         f->bgRest = bgRest;
@@ -431,7 +435,13 @@ namespace Wnd
         if (f->focus) DeleteObject(f->focus);
         f->rest = CreateSolidBrush(Ui::Ref(bgRest));
         f->focus = CreateSolidBrush(Ui::Ref(bgFocus));
-        if (fontSize != f->size || !f->font) { f->size = fontSize; FieldMakeFont(f); }
+        if (fontSize != f->size || font != f->fontKind || weight != f->weight || !f->font)
+        {
+            f->size = fontSize;
+            f->fontKind = font;
+            f->weight = weight;
+            FieldMakeFont(f);
+        }
         InvalidateRect(f->hwnd, nullptr, TRUE);
     }
     void FieldSetBounds(TextField* f, RectF r)
@@ -458,7 +468,11 @@ namespace Wnd
     void FieldFocus(TextField* f) { SetFocus(f->hwnd); }
     bool FieldHasFocus(TextField* f) { return GetFocus() == f->hwnd; }
     void FieldSelectAll(TextField* f) { SendMessageW(f->hwnd, EM_SETSEL, 0, -1); }
+    void FieldSetMaxLen(TextField* f, int n) { SendMessageW(f->hwnd, EM_LIMITTEXT, (WPARAM)n, 0); }
     void FieldSetCue(TextField* f, const Str& cue) { SendMessageW(f->hwnd, EM_SETCUEBANNER, TRUE, (LPARAM)cue.c()); }
+
+    void OpenUrl(const Str& url) { ShellExecuteW(nullptr, L"open", url.c(), nullptr, nullptr, SW_SHOWNORMAL); }
+    void OpenFolder(const Str& path) { ShellExecuteW(nullptr, L"open", L"explorer.exe", path.c(), nullptr, SW_SHOWNORMAL); }
 
     bool Confirm(Window* owner, const Str& title, const Str& text)
     {

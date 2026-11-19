@@ -118,8 +118,13 @@ namespace Wnd
     bool FieldHasFocus(TextField* f);
     void FieldSelectAll(TextField* f);
     void FieldSetCue(TextField* f, const Str& cue); // 空着时显示的灰色提示
-    // 字号（DIP）、文字颜色、平时和有焦点时的底色（不透明）；主题变了要重新设
-    void FieldStyle(TextField* f, float fontSize, u32 textColor, u32 bgRest, u32 bgFocus);
+    // 字体（FontNote / FontUi）、字号（DIP）、粗细、文字颜色、平时和有焦点时的底色（不透明）；主题变了要重新设
+    void FieldStyle(TextField* f, int font, float fontSize, int weight, u32 textColor, u32 bgRest, u32 bgFocus);
+    void FieldSetMaxLen(TextField* f, int n);
+
+    // ---- 交给系统 ----
+    void OpenUrl(const Str& url);      // 默认浏览器打开
+    void OpenFolder(const Str& path);  // 文件管理器打开
 
     // ---- 系统对话框 ----
     bool Confirm(Window* owner, const Str& title, const Str& text); // 确定 / 取消（警告样式）

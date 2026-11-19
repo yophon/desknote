@@ -233,8 +233,7 @@ void App::ShowManage()
 void App::ShowSettings()
 {
     if (!settingsWnd) settingsWnd = SettingsWindowCreate();
-    ShowWindow(settingsWnd, SW_SHOW);
-    SetForegroundWindow(settingsWnd);
+    if (settingsWnd) Wnd::Show(settingsWnd);
 }
 
 // =====================================================================
@@ -367,11 +366,14 @@ const wchar_t* App::ApplyHotkey()
 {
     UnregisterHotKey(msgWnd, 1);
     if (!settings.hotkeyEnabled) return nullptr;
-    UINT mods, vk;
+    int mods, vk;
     if (!HotkeyParse(settings.hotkey, &mods, &vk)) return L"快捷键格式不对";
-    if (!RegisterHotKey(msgWnd, 1, mods | MOD_NOREPEAT, vk)) return L"注册失败，可能被其他软件占用了";
+    UINT m = MOD_NOREPEAT | (mods & ModCtrl ? MOD_CONTROL : 0) | (mods & ModAlt ? MOD_ALT : 0) | (mods & ModShift ? MOD_SHIFT : 0) | (mods & ModWin ? MOD_WIN : 0);
+    if (!RegisterHotKey(msgWnd, 1, m, (UINT)vk)) return L"注册失败，可能被其他软件占用了";
     return nullptr;
 }
+
+void App::PauseHotkey() { UnregisterHotKey(msgWnd, 1); }
 
 // =====================================================================
 // 开机启动
@@ -531,7 +533,7 @@ void App::Exit()
     TrayRemove();
     if (trashWnd) Wnd::Destroy(trashWnd);
     if (manageWnd) Wnd::Destroy(manageWnd);
-    if (settingsWnd) DestroyWindow(settingsWnd);
+    if (settingsWnd) Wnd::Destroy(settingsWnd);
     if (g_changeNotif != INVALID_HANDLE_VALUE) FindCloseChangeNotification(g_changeNotif);
     PostQuitMessage(0);
 }
@@ -610,7 +612,6 @@ extern "C" void __stdcall Start()
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES | ICC_DATE_CLASSES | ICC_HOTKEY_CLASS | ICC_WIN95_CLASSES };
     InitCommonControlsEx(&icc);
-    RegisterDialogClasses();
     Wnd::RegisterClasses();
 
     g_app = new App();
@@ -659,7 +660,6 @@ extern "C" void __stdcall Start()
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
         {
             if (msg.message == WM_QUIT) { quit = true; break; }
-            if (g_app->settingsWnd && !SettingsWindowWantsKeys(g_app->settingsWnd) && IsDialogMessageW(g_app->settingsWnd, &msg)) continue;
             if (Wnd::PreTranslate(&msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
