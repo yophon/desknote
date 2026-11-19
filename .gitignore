@@ -1,0 +1,6 @@
+# build output
+*.exe
+*.pdb
+*.tmp
+# local backups of old single-file version
+*.bak
