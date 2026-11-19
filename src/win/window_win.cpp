@@ -40,7 +40,14 @@ static const wchar_t* PopupClass = L"DeskNotePopup";
 static const wchar_t* NoteClass = L"DeskNoteNote";
 static Vec<Window*> g_dialogs; // 消息循环里要做对话框导航的窗口
 
-static float ScaleOf(Window* w) { return w->dpi / 96.f; }
+// 每次都问系统：窗口挪到缩放不同的屏上后，系统先改窗口的 DPI 再发 WM_DPICHANGED，
+// 只在创建时记一次的话，便签挪到别的屏上会一直按原来那块屏的比例画
+static float ScaleOf(Window* w)
+{
+    UINT dpi = w->hwnd ? GetDpiForWindow(w->hwnd) : 0;
+    if (dpi) w->dpi = (int)dpi;
+    return w->dpi / 96.f;
+}
 
 static int CurrentMods()
 {

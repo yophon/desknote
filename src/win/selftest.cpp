@@ -434,6 +434,39 @@ static void Phase1(const Str& server, const Str& key)
 
     if (server.n) SyncTests(server, key);
 
+    // ---- 每块屏上：窗口大小 = 便签大小 × 那块屏的缩放比例（便签先建在主屏再挪过去，曾按主屏的比例画）----
+    {
+        struct Mons { RECT r[8]; int n; } mons = {};
+        EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR, HDC, LPRECT rc, LPARAM l) -> BOOL {
+            Mons* m = (Mons*)l;
+            if (m->n < 8) m->r[m->n++] = *rc;
+            return TRUE;
+        }, (LPARAM)&mons);
+        app->CreateNoteFromContent(app->notes[0]->d->ContentJson(), L"（缩放测试）");
+        NoteWin* sn = app->notes.Last();
+        sn->CommitEdit(true);
+        bool ok = true;
+        Str detail;
+        for (int i = 0; i < mons.n && sn->win; i++)
+        {
+            sn->Destroy();
+            sn->d->hasPos = true;
+            sn->d->x = mons.r[i].left + 100;
+            sn->d->y = mons.r[i].top + 100;
+            sn->Create();
+            Pump(200);
+            HWND h = Wnd::H(sn->win);
+            RECT wr;
+            GetWindowRect(h, &wr);
+            int want = (int)(sn->d->width * GetDpiForWindow(h) / 96.0 + 0.5);
+            detail.Append(L"屏").Int(i).Append(L" dpi=").Int(GetDpiForWindow(h)).Append(L" 宽=").Int(wr.right - wr.left).Append(L" 应为=").Int(want).Append(L"；");
+            if (wr.right - wr.left != want) ok = false;
+        }
+        Check(L"每块屏上便签窗口按那块屏的缩放比例画", ok, detail);
+        app->DeleteNote(sn, false);
+        Pump(200);
+    }
+
     // ---- 隐藏（便签管理）：只在这台电脑上，窗口销毁，提到最前时跳过 ----
     app->CreateNoteFromContent(app->notes[0]->d->ContentJson(), L"（隐藏测试）");
     NoteWin* hdn = nullptr;
