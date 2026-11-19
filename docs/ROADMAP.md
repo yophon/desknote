@@ -16,4 +16,4 @@
 
 ## 分发与维护
 4. **更新通道**：exe + 版本文件放 gopan 分享链接，启动时检查一次，有新版提示下载（仓库私有，朋友看不到 GitHub 发布）。
-5. **CI**：GitHub Actions Windows 机器每次推送编译并跑 tests\selftest.ps1。
+5. ~~**CI**~~（2026-11-19）：`.github/workflows/ci.yml`，Windows 编译并跑核心测试、回归测试；Linux、macOS 跑核心测试并检查 `src/ui` 能编译。
