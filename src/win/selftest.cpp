@@ -452,7 +452,7 @@ static void Phase1(const Str& server, const Str& key)
         app->ShowManage();
         Pump(200);
         Check(L"便签管理窗口能打开", app->manageWnd != nullptr);
-        if (app->manageWnd) DestroyWindow(app->manageWnd);
+        if (app->manageWnd) Wnd::Destroy(app->manageWnd);
         Pump(50);
         // 隐藏着改设置（便签管理里的「设置」）：只记下来，显示时按新设置建窗口
         WinMode oldMode = hdn->d->mode;
@@ -543,7 +543,7 @@ void MemDiagRun(const Str& outFile)
     NoteWin* w = g_app->notes[0];
     for (int i = 0; i < 3; i++) { g_app->ShowSettings(); Pump(300); DestroyWindow(g_app->settingsWnd); }
     Sample(out, L"开关设置窗口 3 次");
-    for (int i = 0; i < 3; i++) { g_app->ShowTrash(); Pump(300); DestroyWindow(g_app->trashWnd); }
+    for (int i = 0; i < 3; i++) { g_app->ShowTrash(); Pump(300); Wnd::Destroy(g_app->trashWnd); }
     Sample(out, L"开关回收站 3 次");
     for (int i = 0; i < 200; i++) { w->Render(); if (i % 20 == 0) Pump(10); }
     Sample(out, L"重绘 200 次");

@@ -1,5 +1,6 @@
 // 回收站、设置、提醒对话框（都是自绘，跟随系统深浅色）
 #include "ui.h"
+#include "window_win.h"
 #include <dwmapi.h>
 #include <imm.h>
 #include <commctrl.h>
@@ -62,22 +63,19 @@ Str HotkeyFormat(UINT mods, UINT vk)
 // =====================================================================
 static void ApplyFrameTheme(HWND h);
 
-struct TrashWin
+struct TrashWin : WinHandler
 {
-    HWND hwnd = nullptr;
-    int dpi = 96;
-    float S() const { return dpi / 96.f; }
+    Window* win = nullptr;
     struct Hit { int id; RectF r; TrashEntry* e; };
     Vec<Hit> hits;            // 列表里的区域是内容坐标（要加滚动），顶栏是窗口坐标
     int hover = 0, press = 0;
     TrashEntry* hoverEntry = nullptr;
-    bool tracking = false;
     float scroll = 0, contentH = 0, listTop = 0;
     enum { HEmpty = 1, HRow = 2, HRestore = 3, HPurge = 4 };
 
-    void Invalidate() { InvalidateRect(hwnd, nullptr, FALSE); }
-    float ClientW() { RECT rc; GetClientRect(hwnd, &rc); return rc.right / S(); }
-    float ClientH() { RECT rc; GetClientRect(hwnd, &rc); return rc.bottom / S(); }
+    void Invalidate() { Wnd::Invalidate(win); }
+    float ClientW() { float w; Wnd::ClientSize(win, &w, nullptr); return w; }
+    float ClientH() { float h; Wnd::ClientSize(win, nullptr, &h); return h; }
     void ClampScroll() { scroll = Clamp(scroll, 0.f, Max(0.f, contentH - (ClientH() - listTop))); }
 
     static Str DayLabel(Time t)
@@ -239,26 +237,15 @@ struct TrashWin
         }
     }
 
-    void Paint()
+    void Paint(Window*, Painter* rt, float, float) override
     {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        Canvas c;
-        if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
-        {
-            Gfx::Clear(c.rt, Ui::T.winBg);
-            Build(c.rt);
-        }
-        c.EndBlt(dc);
-        EndPaint(hwnd, &ps);
+        Gfx::Clear(rt, Ui::T.winBg);
+        Build(rt);
     }
 
     // 返回命中区域的 id，并给出对应条目
-    int HitAt(int px, int py, TrashEntry** e)
+    int HitAt(float x, float y, TrashEntry** e)
     {
-        float x = px / S(), y = py / S();
         *e = nullptr;
         for (int i = hits.n - 1; i >= 0; i--)
         {
@@ -276,7 +263,7 @@ struct TrashWin
         {
             Str msg(L"彻底删除回收站里的全部 ");
             msg.Int(g_app->trash.n).Append(L" 项？删除后不能恢复。");
-            if (MessageBoxW(hwnd, msg.c(), L"清空回收站", MB_OKCANCEL | MB_ICONWARNING) == IDOK) g_app->EmptyTrash();
+            if (Wnd::Confirm(win, Str(L"清空回收站"), msg)) g_app->EmptyTrash();
             return;
         }
         if (!e || !g_app->trash.Contains(e)) return;
@@ -294,138 +281,86 @@ struct TrashWin
         Invalidate();
     }
 
-    static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
+    bool OnEvent(Window* w, const Event& ev) override
     {
-        TrashWin* self = (TrashWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
-        if (m == WM_NCCREATE)
+        TrashEntry* e;
+        switch (ev.type)
         {
-            self = (TrashWin*)((CREATESTRUCTW*)l)->lpCreateParams;
-            self->hwnd = h;
-            SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
+        case EvResize: Build(nullptr); ClampScroll(); Invalidate(); return true;
+        case EvMouseMove:
+        {
+            int id = HitAt(ev.x, ev.y, &e);
+            if (id != hover || e != hoverEntry) { hover = id; hoverEntry = e; Invalidate(); }
+            return true;
         }
-        if (!self) return DefWindowProcW(h, m, w, l);
-        switch (m)
-        {
-        case WM_PAINT: self->Paint(); return 0;
-        case WM_ERASEBKGND: return 1;
-        case WM_SIZE: self->Build(nullptr); self->ClampScroll(); self->Invalidate(); return 0;
-        case WM_GETMINMAXINFO:
-            ((MINMAXINFO*)l)->ptMinTrackSize.x = (int)(440 * self->S());
-            ((MINMAXINFO*)l)->ptMinTrackSize.y = (int)(320 * self->S());
-            return 0;
-        case WM_MOUSEMOVE:
-        {
-            if (!self->tracking)
+        case EvMouseLeave:
+            hover = 0;
+            hoverEntry = nullptr;
+            Invalidate();
+            return true;
+        case EvMouseDown:
+            if (ev.button != MouseLeft) return false;
+            if (ev.clicks == 2)
             {
-                TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
-                TrackMouseEvent(&t);
-                self->tracking = true;
+                if (HitAt(ev.x, ev.y, &e) == HRow) Activate(HRestore, e);
+                return true;
             }
-            TrashEntry* e;
-            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e);
-            if (id != self->hover || e != self->hoverEntry) { self->hover = id; self->hoverEntry = e; self->Invalidate(); }
-            return 0;
-        }
-        case WM_MOUSELEAVE:
-            self->tracking = false;
-            self->hover = 0;
-            self->hoverEntry = nullptr;
-            self->Invalidate();
-            return 0;
-        case WM_LBUTTONDOWN:
+            press = HitAt(ev.x, ev.y, &e);
+            if (press) Wnd::Capture(w, true);
+            Invalidate();
+            return true;
+        case EvMouseUp:
         {
-            TrashEntry* e;
-            self->press = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e);
-            if (self->press) SetCapture(h);
-            self->Invalidate();
-            return 0;
+            if (ev.button != MouseLeft) return false;
+            int p = press;
+            press = 0;
+            Wnd::Capture(w, false);
+            int id = HitAt(ev.x, ev.y, &e);
+            if (p && id == p && p != HRow) Activate(p, e);
+            Invalidate();
+            return true;
         }
-        case WM_LBUTTONUP:
+        case EvWheel:
         {
-            int p = self->press;
-            self->press = 0;
-            if (GetCapture() == h) ReleaseCapture();
-            TrashEntry* e;
-            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e);
-            if (p && id == p && p != HRow) self->Activate(p, e);
-            self->Invalidate();
-            return 0;
-        }
-        case WM_LBUTTONDBLCLK:
-        {
-            TrashEntry* e;
-            if (self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &e) == HRow) self->Activate(HRestore, e);
-            return 0;
-        }
-        case WM_MOUSEWHEEL:
-        {
-            float old = self->scroll;
-            self->scroll -= GET_WHEEL_DELTA_WPARAM(w) / 120.f * 66;
-            self->ClampScroll();
-            if (self->scroll != old)
+            float old = scroll;
+            scroll -= ev.wheel * 66;
+            ClampScroll();
+            if (scroll != old)
             {
-                POINT p;
-                GetCursorPos(&p);
-                ScreenToClient(h, &p);
-                TrashEntry* e;
-                self->Build(nullptr);
-                self->hover = self->HitAt(p.x, p.y, &e);
-                self->hoverEntry = e;
-                self->Invalidate();
+                Build(nullptr);
+                hover = HitAt(ev.x, ev.y, &e);
+                hoverEntry = e;
+                Invalidate();
             }
-            return 0;
+            return true;
         }
-        case WM_COMMAND:
-            if (LOWORD(w) == IDCANCEL) DestroyWindow(h);
-            return 0;
-        case WM_DPICHANGED:
-        {
-            self->dpi = HIWORD(w);
-            RECT* rc = (RECT*)l;
-            SetWindowPos(h, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
-            self->Invalidate();
-            return 0;
-        }
-        case WM_SETTINGCHANGE:
-            if (l && WEq((const wchar_t*)l, L"ImmersiveColorSet")) { Ui::LoadTheme(); ApplyFrameTheme(h); self->Invalidate(); }
-            break;
-        case WM_CLOSE: DestroyWindow(h); return 0;
-        case WM_DESTROY:
+        case EvScale: case EvTheme: Invalidate(); return true;
+        case EvDestroy:
             g_app->trashWnd = nullptr;
-            SetWindowLongPtrW(h, GWLP_USERDATA, 0);
-            delete self;
-            return 0;
+            delete this;
+            return true;
         }
-        return DefWindowProcW(h, m, w, l);
+        return false;
     }
 };
 
-HWND TrashWindowCreate()
+Window* TrashWindowCreate()
 {
-    Ui::LoadTheme();
     TrashWin* d = new TrashWin();
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"DeskNoteTrash", L"DeskNote 回收站", WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, g_inst, d);
-    d->dpi = GetDpiForWindow(h);
-    SetIcons(h);
-    ApplyFrameTheme(h);
-    POINT p;
-    GetCursorPos(&p);
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
-    float S = d->S();
-    int maxH = (int)((mi.rcWork.bottom - mi.rcWork.top) * 0.85f);
-    RECT r = { 0, 0, (int)(640 * S), Min((int)(580 * S), maxH) };
-    AdjustWindowRectExForDpi(&r, GetWindowLongW(h, GWL_STYLE), FALSE, GetWindowLongW(h, GWL_EXSTYLE), d->dpi);
-    int w = r.right - r.left, ht = r.bottom - r.top;
-    SetWindowPos(h, nullptr, (mi.rcWork.left + mi.rcWork.right - w) / 2, (mi.rcWork.top + mi.rcWork.bottom - ht) / 2, w, ht, SWP_NOZORDER | SWP_NOACTIVATE);
+    WinDesc desc;
+    desc.title = L"DeskNote 回收站";
+    desc.minW = 440;
+    desc.minH = 320;
+    d->win = Wnd::NewDialog(desc, d);
+    if (!d->win) { delete d; return nullptr; }
+    Wnd::PlaceCentered(d->win, 640, 580, 0.85f, 0);
     d->Build(nullptr);
-    return h;
+    return d->win;
 }
 
-void TrashWindowRefresh(HWND w)
+void TrashWindowRefresh(Window* w)
 {
-    TrashWin* d = (TrashWin*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    TrashWin* d = (TrashWin*)Wnd::Handler(w);
     if (d) d->Refresh();
 }
 
@@ -1680,63 +1615,33 @@ static Str Lower(const Str& s)
     return t;
 }
 
-struct ManageWin
+struct ManageWin : WinHandler
 {
-    HWND hwnd = nullptr;
-    int dpi = 96;
-    float S() const { return dpi / 96.f; }
-    HWND search = nullptr;
-    HFONT font = nullptr;
-    int editH = 0;
-    HBRUSH brushRest = nullptr, brushFocus = nullptr;
-    RectF searchFrame = {};
+    Window* win = nullptr;
+    float S() const { return Wnd::Scale(win); }
+    TextField* search = nullptr;
+    RectF searchFrame;
     struct Hit { int id; RectF r; NoteWin* w; };
     Vec<Hit> hits;              // 列表里的区域是内容坐标（要加滚动），顶栏是窗口坐标
     int hover = 0, press = 0;
     NoteWin* hoverNote = nullptr;
     NoteWin* pressNote = nullptr;
     NoteWin* expanded = nullptr; // 展开看条目的那张
-    bool tracking = false;
     float scroll = 0, contentH = 0, listTop = 0;
     enum { HNew = 1, HShowAll, HRow, HToggle, HLocate, HDelete, HSettings };
 
-    void Invalidate() { InvalidateRect(hwnd, nullptr, FALSE); }
-    float ClientW() { RECT rc; GetClientRect(hwnd, &rc); return rc.right / S(); }
-    float ClientH() { RECT rc; GetClientRect(hwnd, &rc); return rc.bottom / S(); }
+    void Invalidate() { Wnd::Invalidate(win); }
+    float ClientW() { float w; Wnd::ClientSize(win, &w, nullptr); return w; }
+    float ClientH() { float h; Wnd::ClientSize(win, nullptr, &h); return h; }
     void ClampScroll() { scroll = Clamp(scroll, 0.f, Max(0.f, contentH - (ClientH() - listTop))); }
     bool Alive(NoteWin* w) const { return w && g_app->notes.Contains(w); }
 
     void Init()
     {
-        brushRest = CreateSolidBrush(Ui::Ref(Ui::T.inputBg));
-        brushFocus = CreateSolidBrush(Ui::Ref(Ui::T.inputFocusBg));
-        search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 10, 10, hwnd, (HMENU)100, g_inst, nullptr);
-        Ui::AllowDarkControls(search);
-        SendMessageW(search, EM_SETCUEBANNER, TRUE, (LPARAM)L"搜索标题或内容");
-        MakeFont();
+        search = Wnd::CreateField(win, Str(), 0);
+        Wnd::FieldSetCue(search, Str(L"搜索标题或内容"));
     }
-    void MakeFont()
-    {
-        if (font) DeleteObject(font);
-        font = CreateFontW(-(int)(14 * S() + 0.5f), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-        HDC dc = GetDC(hwnd);
-        HGDIOBJ of = SelectObject(dc, font);
-        TEXTMETRICW tm;
-        GetTextMetricsW(dc, &tm);
-        editH = tm.tmHeight;
-        SelectObject(dc, of);
-        ReleaseDC(hwnd, dc);
-        SendMessageW(search, WM_SETFONT, (WPARAM)font, TRUE);
-    }
-    Str Query()
-    {
-        int len = GetWindowTextLengthW(search);
-        Str s;
-        s.Reserve(len);
-        GetWindowTextW(search, s.p, len + 1);
-        s.n = WLen(s.p);
-        return Lower(s.Trim());
-    }
+    Str Query() { return Lower(Wnd::FieldText(search).Trim()); }
 
     struct Entry { NoteWin* w; u64 key; SYSTEMTIME st; bool hasTime; };
     // 按搜索过滤，按修改时间从新到旧
@@ -1792,7 +1697,7 @@ struct ManageWin
         searchFrame = RectF(L, y, R, y + 34);
         if (rt)
         {
-            bool f = GetFocus() == search;
+            bool f = Wnd::FieldHasFocus(search);
             Ui::Fill(rt, searchFrame, 4, f ? T.inputFocusBg : T.inputBg);
             Ui::Stroke(rt, searchFrame, 4, T.ctrlBorder, 1);
             if (f) Ui::Fill(rt, RectF(searchFrame.left + 1, searchFrame.bottom - 2, searchFrame.right - 1, searchFrame.bottom), 1, T.accent);
@@ -1928,38 +1833,17 @@ struct ManageWin
         }
     }
 
-    void PlaceEdit()
-    {
-        float s = S();
-        int x = (int)((searchFrame.left + 34) * s), w = (int)((searchFrame.right - 10) * s) - x;
-        int cy = (int)((searchFrame.top + searchFrame.bottom) / 2 * s);
-        RECT cur;
-        GetWindowRect(search, &cur);
-        MapWindowPoints(nullptr, hwnd, (POINT*)&cur, 2);
-        if (cur.left != x || cur.top != cy - editH / 2 || cur.right - cur.left != w)
-            MoveWindow(search, x, cy - editH / 2, w, editH, TRUE);
-    }
+    void PlaceEdit() { Wnd::FieldSetBounds(search, RectF(searchFrame.left + 34, searchFrame.top, searchFrame.right - 10, searchFrame.bottom)); }
 
-    void Paint()
+    void Paint(Window*, Painter* rt, float, float) override
     {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        Canvas c;
-        if (c.Begin(rc.right, rc.bottom, (float)dpi, true))
-        {
-            Gfx::Clear(c.rt, Ui::T.winBg);
-            Build(c.rt);
-        }
-        c.EndBlt(dc);
-        EndPaint(hwnd, &ps);
+        Gfx::Clear(rt, Ui::T.winBg);
+        Build(rt);
         PlaceEdit();
     }
 
-    int HitAt(int px, int py, NoteWin** w)
+    int HitAt(float x, float y, NoteWin** w)
     {
-        float x = px / S(), y = py / S();
         *w = nullptr;
         for (int i = hits.n - 1; i >= 0; i--)
         {
@@ -1992,9 +1876,8 @@ struct ManageWin
             for (int i = 0; i < hits.n; i++)
                 if (hits[i].id == HSettings && hits[i].w == w)
                 {
-                    POINT p = { (LONG)(hits[i].r.left * S()), (LONG)((hits[i].r.bottom - scroll + 2) * S()) };
-                    ClientToScreen(hwnd, &p);
-                    w->ShowSettingsMenu(p.x, p.y, hwnd);
+                    PointI p = Wnd::ToScreen(win, hits[i].r.left, hits[i].r.bottom - scroll + 2);
+                    w->ShowSettingsMenu(p.x, p.y, Wnd::H(win));
                     break;
                 }
             break;
@@ -2011,181 +1894,109 @@ struct ManageWin
         Invalidate();
     }
 
-    static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
+    bool OnEvent(Window* w, const Event& ev) override
     {
-        ManageWin* self = (ManageWin*)GetWindowLongPtrW(h, GWLP_USERDATA);
-        if (m == WM_NCCREATE)
+        NoteWin* n;
+        switch (ev.type)
         {
-            self = (ManageWin*)((CREATESTRUCTW*)l)->lpCreateParams;
-            self->hwnd = h;
-            SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)self);
+        case EvResize: Build(nullptr); ClampScroll(); PlaceEdit(); Invalidate(); return true;
+        case EvMouseMove:
+        {
+            int id = HitAt(ev.x, ev.y, &n);
+            if (id != hover || n != hoverNote) { hover = id; hoverNote = n; Invalidate(); }
+            return true;
         }
-        if (!self) return DefWindowProcW(h, m, w, l);
-        switch (m)
-        {
-        case WM_PAINT: self->Paint(); return 0;
-        case WM_ERASEBKGND: return 1;
-        case WM_SIZE: self->Build(nullptr); self->ClampScroll(); self->PlaceEdit(); self->Invalidate(); return 0;
-        case WM_GETMINMAXINFO:
-            ((MINMAXINFO*)l)->ptMinTrackSize.x = (int)(480 * self->S());
-            ((MINMAXINFO*)l)->ptMinTrackSize.y = (int)(360 * self->S());
-            return 0;
-        case WM_CTLCOLOREDIT:
-        {
-            bool f = GetFocus() == (HWND)l;
-            u32 bg = f ? Ui::T.inputFocusBg : Ui::T.inputBg;
-            SetTextColor((HDC)w, Ui::Ref(Ui::Solid(Ui::T.text, bg)));
-            SetBkColor((HDC)w, Ui::Ref(bg));
-            return (LRESULT)(f ? self->brushFocus : self->brushRest);
-        }
-        case WM_MOUSEMOVE:
-        {
-            if (!self->tracking)
+        case EvMouseLeave:
+            hover = 0;
+            hoverNote = nullptr;
+            Invalidate();
+            return true;
+        case EvMouseDown:
+            if (ev.button != MouseLeft) return false;
+            if (ev.clicks == 2)
             {
-                TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
-                TrackMouseEvent(&t);
-                self->tracking = true;
+                // 双击一行：显示出来并定位
+                if (HitAt(ev.x, ev.y, &n) == HRow && Alive(n))
+                {
+                    if (n->d->hidden) n->SetHidden(false);
+                    n->Locate();
+                }
+                return true;
             }
-            NoteWin* n;
-            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n);
-            if (id != self->hover || n != self->hoverNote) { self->hover = id; self->hoverNote = n; self->Invalidate(); }
-            return 0;
-        }
-        case WM_MOUSELEAVE:
-            self->tracking = false;
-            self->hover = 0;
-            self->hoverNote = nullptr;
-            self->Invalidate();
-            return 0;
-        case WM_LBUTTONDOWN:
+            Wnd::Focus(w); // 点空白处：搜索框失去焦点
+            press = HitAt(ev.x, ev.y, &pressNote);
+            if (press) Wnd::Capture(w, true);
+            Invalidate();
+            return true;
+        case EvMouseUp:
         {
-            if (GetFocus() != h) SetFocus(h); // 点空白处：搜索框失去焦点
-            self->press = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &self->pressNote);
-            if (self->press) SetCapture(h);
-            self->Invalidate();
-            return 0;
-        }
-        case WM_LBUTTONUP:
-        {
-            int p = self->press;
-            NoteWin* pn = self->pressNote;
-            self->press = 0;
-            self->pressNote = nullptr;
-            if (GetCapture() == h) ReleaseCapture();
-            NoteWin* n;
-            int id = self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n);
-            if (p && id == p && n == pn) self->Activate(p, n);
-            self->Invalidate();
-            return 0;
-        }
-        case WM_RBUTTONUP:
-        {
-            // 右键一行：这张便签的设置菜单
-            NoteWin* n;
-            if (self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n) && self->Alive(n))
+            if (ev.button == MouseRight)
             {
-                POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
-                ClientToScreen(h, &p);
-                n->ShowSettingsMenu(p.x, p.y, h);
+                // 右键一行：这张便签的设置菜单
+                if (HitAt(ev.x, ev.y, &n) && Alive(n))
+                {
+                    PointI p = Wnd::ToScreen(w, ev.x, ev.y);
+                    n->ShowSettingsMenu(p.x, p.y, Wnd::H(w));
+                }
+                return true;
             }
-            return 0;
+            int p = press;
+            NoteWin* pn = pressNote;
+            press = 0;
+            pressNote = nullptr;
+            Wnd::Capture(w, false);
+            int id = HitAt(ev.x, ev.y, &n);
+            if (p && id == p && n == pn) Activate(p, n);
+            Invalidate();
+            return true;
         }
-        case WM_LBUTTONDBLCLK:
+        case EvWheel:
         {
-            // 双击一行：显示出来并定位
-            NoteWin* n;
-            if (self->HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &n) == HRow && self->Alive(n))
-            {
-                if (n->d->hidden) n->SetHidden(false);
-                n->Locate();
-            }
-            return 0;
+            float old = scroll;
+            scroll -= ev.wheel * 66;
+            ClampScroll();
+            if (scroll != old) Invalidate();
+            return true;
         }
-        case WM_MOUSEWHEEL:
-        {
-            float old = self->scroll;
-            self->scroll -= GET_WHEEL_DELTA_WPARAM(w) / 120.f * 66;
-            self->ClampScroll();
-            if (self->scroll != old) self->Invalidate();
-            return 0;
-        }
-        case WM_COMMAND:
-        {
-            int id = LOWORD(w), code = HIWORD(w);
-            if (id == 100 && code == EN_CHANGE) { self->scroll = 0; self->Refresh(); return 0; }
-            if (id == 100 && (code == EN_SETFOCUS || code == EN_KILLFOCUS)) { self->Invalidate(); InvalidateRect((HWND)l, nullptr, TRUE); return 0; }
-            if (id == IDCANCEL)
-            {
-                // Esc：搜索框里有字先清空，没有就关窗口
-                if (GetWindowTextLengthW(self->search) > 0) SetWindowTextW(self->search, L"");
-                else DestroyWindow(h);
-            }
-            return 0;
-        }
-        case WM_DPICHANGED:
-        {
-            self->dpi = HIWORD(w);
-            self->MakeFont();
-            RECT* rc = (RECT*)l;
-            SetWindowPos(h, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
-            self->Invalidate();
-            return 0;
-        }
-        case WM_SETTINGCHANGE:
-            if (l && WEq((const wchar_t*)l, L"ImmersiveColorSet"))
-            {
-                Ui::LoadTheme();
-                ApplyFrameTheme(h);
-                DeleteObject(self->brushRest);
-                DeleteObject(self->brushFocus);
-                self->brushRest = CreateSolidBrush(Ui::Ref(Ui::T.inputBg));
-                self->brushFocus = CreateSolidBrush(Ui::Ref(Ui::T.inputFocusBg));
-                Ui::AllowDarkControls(self->search);
-                self->Invalidate();
-            }
-            break;
-        case WM_CLOSE: DestroyWindow(h); return 0;
-        case WM_DESTROY:
+        case EvFieldChange: scroll = 0; Refresh(); return true;
+        case EvFieldFocus: case EvFieldBlur: Invalidate(); return true;
+        case EvClose:
+            // Esc：搜索框里有字先清空，没有就关窗口
+            if (ev.key == KeyEscape && Wnd::FieldText(search).n > 0) { Wnd::FieldSetText(search, Str()); return true; }
+            return false;
+        case EvScale: Invalidate(); return true;
+        case EvTheme:
+            Wnd::FieldStyle(search, 14, Ui::T.text, Ui::T.inputBg, Ui::T.inputFocusBg);
+            Invalidate();
+            return true;
+        case EvDestroy:
             g_app->manageWnd = nullptr;
-            SetWindowLongPtrW(h, GWLP_USERDATA, 0);
-            if (self->font) DeleteObject(self->font);
-            if (self->brushRest) DeleteObject(self->brushRest);
-            if (self->brushFocus) DeleteObject(self->brushFocus);
-            delete self;
-            return 0;
+            delete this;
+            return true;
         }
-        return DefWindowProcW(h, m, w, l);
+        return false;
     }
 };
 
-HWND ManageWindowCreate()
+Window* ManageWindowCreate()
 {
-    Ui::LoadTheme();
     ManageWin* d = new ManageWin();
-    HWND h = CreateWindowExW(WS_EX_CONTROLPARENT, L"DeskNoteManage", L"DeskNote 便签管理", (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, g_inst, d);
-    d->dpi = GetDpiForWindow(h);
-    SetIcons(h);
-    ApplyFrameTheme(h);
+    WinDesc desc;
+    desc.title = L"DeskNote 便签管理";
+    desc.minW = 480;
+    desc.minH = 360;
+    d->win = Wnd::NewDialog(desc, d);
+    if (!d->win) { delete d; return nullptr; }
     d->Init();
-    POINT p;
-    GetCursorPos(&p);
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
-    float S = d->S();
-    int maxH = (int)((mi.rcWork.bottom - mi.rcWork.top) * 0.85f);
-    RECT r = { 0, 0, (int)(640 * S), Min((int)(600 * S), maxH) };
-    AdjustWindowRectExForDpi(&r, GetWindowLongW(h, GWL_STYLE), FALSE, GetWindowLongW(h, GWL_EXSTYLE), d->dpi);
-    int w = r.right - r.left, ht = r.bottom - r.top;
-    SetWindowPos(h, nullptr, (mi.rcWork.left + mi.rcWork.right - w) / 2, (mi.rcWork.top + mi.rcWork.bottom - ht) / 2, w, ht, SWP_NOZORDER | SWP_NOACTIVATE);
+    Wnd::PlaceCentered(d->win, 640, 600, 0.85f, 0);
     d->Build(nullptr);
     d->PlaceEdit();
-    return h;
+    return d->win;
 }
 
-void ManageWindowRefresh(HWND w)
+void ManageWindowRefresh(Window* w)
 {
-    ManageWin* d = (ManageWin*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    ManageWin* d = (ManageWin*)Wnd::Handler(w);
     if (d) d->Refresh();
 }
 
@@ -2198,7 +2009,5 @@ void RegisterDialogClasses()
     wc.style = CS_DBLCLKS;
     wc.hbrBackground = nullptr;
     wc.lpfnWndProc = SettingsWin::Proc; wc.lpszClassName = L"DeskNoteSettings"; RegisterClassW(&wc);
-    wc.lpfnWndProc = TrashWin::Proc; wc.lpszClassName = L"DeskNoteTrash"; RegisterClassW(&wc);
-    wc.lpfnWndProc = ManageWin::Proc; wc.lpszClassName = L"DeskNoteManage"; RegisterClassW(&wc);
     wc.lpfnWndProc = ReminderWin::Proc; wc.lpszClassName = L"DeskNoteReminder"; RegisterClassW(&wc);
 }

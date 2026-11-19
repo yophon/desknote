@@ -1,5 +1,6 @@
 // 程序主体：入口、单实例、托盘、全局快捷键、开机自启、文件监视、提醒、备份、回收站、消息循环
 #include "ui.h"
+#include "window_win.h"
 #include <shellapi.h>
 #include <commctrl.h>
 
@@ -220,15 +221,13 @@ void App::EmptyTrash()
 void App::ShowTrash()
 {
     if (!trashWnd) trashWnd = TrashWindowCreate();
-    ShowWindow(trashWnd, SW_SHOW);
-    SetForegroundWindow(trashWnd);
+    if (trashWnd) Wnd::Show(trashWnd);
 }
 
 void App::ShowManage()
 {
     if (!manageWnd) manageWnd = ManageWindowCreate();
-    ShowWindow(manageWnd, SW_SHOW);
-    SetForegroundWindow(manageWnd);
+    if (manageWnd) Wnd::Show(manageWnd);
 }
 
 void App::ShowSettings()
@@ -530,8 +529,8 @@ void App::Exit()
     for (int i = 0; i < notes.n; i++) { notes[i]->Destroy(); }
     UnregisterHotKey(msgWnd, 1);
     TrayRemove();
-    if (trashWnd) DestroyWindow(trashWnd);
-    if (manageWnd) DestroyWindow(manageWnd);
+    if (trashWnd) Wnd::Destroy(trashWnd);
+    if (manageWnd) Wnd::Destroy(manageWnd);
     if (settingsWnd) DestroyWindow(settingsWnd);
     if (g_changeNotif != INVALID_HANDLE_VALUE) FindCloseChangeNotification(g_changeNotif);
     PostQuitMessage(0);
@@ -612,6 +611,7 @@ extern "C" void __stdcall Start()
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES | ICC_DATE_CLASSES | ICC_HOTKEY_CLASS | ICC_WIN95_CLASSES };
     InitCommonControlsEx(&icc);
     RegisterDialogClasses();
+    Wnd::RegisterClasses();
 
     g_app = new App();
     g_app->isDefaultDir = isDefault;
@@ -628,9 +628,9 @@ extern "C" void __stdcall Start()
     {
         g_app->ShowManage();
         RECT r;
-        GetWindowRect(g_app->manageWnd, &r);
+        GetWindowRect(Wnd::H(g_app->manageWnd), &r);
         Ui::MenuDebug = true;
-        g_app->notes[0]->ShowSettingsMenu(r.left + (r.right - r.left) / 2, r.top + (r.bottom - r.top) / 3, g_app->manageWnd);
+        g_app->notes[0]->ShowSettingsMenu(r.left + (r.right - r.left) / 2, r.top + (r.bottom - r.top) / 3, Wnd::H(g_app->manageWnd));
     }
     else if (open.Eq(L"reminder") && g_app->notes.n) g_app->notes[0]->DebugReminder(2);
     else if (open.Eq(L"hover") && g_app->notes.n) g_app->notes[0]->DebugHover(1, 2);
@@ -660,8 +660,7 @@ extern "C" void __stdcall Start()
         {
             if (msg.message == WM_QUIT) { quit = true; break; }
             if (g_app->settingsWnd && !SettingsWindowWantsKeys(g_app->settingsWnd) && IsDialogMessageW(g_app->settingsWnd, &msg)) continue;
-            if (g_app->trashWnd && IsDialogMessageW(g_app->trashWnd, &msg)) continue;
-            if (g_app->manageWnd && IsDialogMessageW(g_app->manageWnd, &msg)) continue;
+            if (Wnd::PreTranslate(&msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

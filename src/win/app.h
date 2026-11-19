@@ -3,6 +3,7 @@
 #include "win.h"
 #include "store.h"
 #include "links.h"
+#include "window.h"
 #include "gfx.h"
 
 namespace Ui { struct Menu; }
@@ -234,7 +235,9 @@ struct App
     bool exiting = false;
     bool peeking = false;
     HWND msgWnd = nullptr;
-    HWND trashWnd = nullptr, settingsWnd = nullptr, manageWnd = nullptr;
+    Window* trashWnd = nullptr;
+    Window* manageWnd = nullptr;
+    HWND settingsWnd = nullptr;
     NoteWin* balloonNote = nullptr;
     Syncer* sync = nullptr;
     HICON icon = nullptr, iconSmall = nullptr;
@@ -275,10 +278,10 @@ extern App* g_app;
 extern HINSTANCE g_inst;
 
 // 对话框（dialogs.cpp）
-HWND ManageWindowCreate();
-void ManageWindowRefresh(HWND w);
-HWND TrashWindowCreate();
-void TrashWindowRefresh(HWND w);
+Window* ManageWindowCreate();
+void ManageWindowRefresh(Window* w);
+Window* TrashWindowCreate();
+void TrashWindowRefresh(Window* w);
 HWND SettingsWindowCreate();
 void SettingsWindowSyncStatus(HWND w);
 bool SettingsWindowWantsKeys(HWND w); // 正在录快捷键：按键别交给对话框导航处理
